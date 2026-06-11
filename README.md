@@ -57,6 +57,13 @@ For full attribute reference and example automations see [docs/sensors.md](docs/
 | Sensors disappear after delivery | Expected — delivered shipments are filtered out |
 | Sensors not updating | Check **Settings → System → Logs** for `postnl` entries |
 
+## Related integrations
+
+Tracking parcels from other Dutch carriers:
+
+- [ha-dhl-nl](https://github.com/peternijssen/ha-dhl-nl) — DHL eCommerce NL parcel tracker
+- [ha-dpd](https://github.com/peternijssen/ha-dpd) — DPD parcel tracker
+
 ## Disclaimer
 
 This is an independent, community-built project with no affiliation, endorsement, or connection to PostNL or any of its subsidiaries. The PostNL API is undocumented and may change without notice.
