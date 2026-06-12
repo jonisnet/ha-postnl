@@ -5,11 +5,24 @@ from typing import Any
 
 import aiohttp
 import voluptuous as vol
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
+from homeassistant.core import callback
+from homeassistant.helpers import selector
 
 from .auth import PostNLAuth, PostNLAuthError
-from .const import DOMAIN
+from .const import (
+    CONF_DELIVERED_FILTER_AMOUNT,
+    CONF_DELIVERED_FILTER_TYPE,
+    DEFAULT_DELIVERED_FILTER_AMOUNT,
+    DEFAULT_DELIVERED_FILTER_TYPE,
+    DOMAIN,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -18,9 +31,47 @@ _USER_SCHEMA = vol.Schema({
     vol.Required(CONF_PASSWORD): str,
 })
 
+_FILTER_TYPE_SELECTOR = selector.SelectSelector(
+    selector.SelectSelectorConfig(
+        options=[
+            selector.SelectOptionDict(value="days", label="Days"),
+            selector.SelectOptionDict(value="parcels", label="Number of parcels"),
+        ],
+        mode=selector.SelectSelectorMode.LIST,
+    )
+)
+
+_FILTER_AMOUNT_SELECTOR = selector.NumberSelector(
+    selector.NumberSelectorConfig(
+        min=1,
+        max=365,
+        step=1,
+        mode=selector.NumberSelectorMode.BOX,
+    )
+)
+
+_DELIVERED_SCHEMA = vol.Schema({
+    vol.Required(
+        CONF_DELIVERED_FILTER_TYPE, default=DEFAULT_DELIVERED_FILTER_TYPE
+    ): _FILTER_TYPE_SELECTOR,
+    vol.Required(
+        CONF_DELIVERED_FILTER_AMOUNT, default=DEFAULT_DELIVERED_FILTER_AMOUNT
+    ): _FILTER_AMOUNT_SELECTOR,
+})
+
 
 class PostNLConfigFlow(ConfigFlow, domain=DOMAIN):
     VERSION = 1
+
+    def __init__(self) -> None:
+        self._username: str = ""
+        self._password: str = ""
+        self._token: dict | None = None
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> PostNLOptionsFlowHandler:
+        return PostNLOptionsFlowHandler(config_entry)
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
@@ -30,19 +81,40 @@ class PostNLConfigFlow(ConfigFlow, domain=DOMAIN):
             if not errors:
                 await self.async_set_unique_id(user_input[CONF_USERNAME].lower())
                 self._abort_if_unique_id_configured()
-                return self.async_create_entry(
-                    title=user_input[CONF_USERNAME],
-                    data={
-                        CONF_USERNAME: user_input[CONF_USERNAME],
-                        CONF_PASSWORD: user_input[CONF_PASSWORD],
-                        "token": token,
-                    },
-                )
+                self._username = user_input[CONF_USERNAME]
+                self._password = user_input[CONF_PASSWORD]
+                self._token = token
+                return await self.async_step_delivered()
 
         return self.async_show_form(
             step_id="user",
             data_schema=_USER_SCHEMA,
             errors=errors,
+        )
+
+    async def async_step_delivered(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show the delivered-parcels filter form."""
+        if user_input is not None:
+            return self.async_create_entry(
+                title=self._username,
+                data={
+                    CONF_USERNAME: self._username,
+                    CONF_PASSWORD: self._password,
+                    "token": self._token,
+                },
+                options={
+                    CONF_DELIVERED_FILTER_TYPE: user_input[CONF_DELIVERED_FILTER_TYPE],
+                    CONF_DELIVERED_FILTER_AMOUNT: int(
+                        user_input[CONF_DELIVERED_FILTER_AMOUNT]
+                    ),
+                },
+            )
+
+        return self.async_show_form(
+            step_id="delivered",
+            data_schema=_DELIVERED_SCHEMA,
         )
 
     async def async_step_reauth(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
@@ -86,3 +158,46 @@ class PostNLConfigFlow(ConfigFlow, domain=DOMAIN):
         except aiohttp.ClientError as err:
             _LOGGER.debug("PostNL connection error: %s", err)
             return None, {"base": "cannot_connect"}
+
+
+class PostNLOptionsFlowHandler(OptionsFlow):
+    """Handle PostNL options (delivered parcels filter)."""
+
+    def __init__(self, config_entry: ConfigEntry) -> None:
+        self._config_entry = config_entry
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            return self.async_create_entry(
+                title="",
+                data={
+                    CONF_DELIVERED_FILTER_TYPE: user_input[CONF_DELIVERED_FILTER_TYPE],
+                    CONF_DELIVERED_FILTER_AMOUNT: int(
+                        user_input[CONF_DELIVERED_FILTER_AMOUNT]
+                    ),
+                },
+            )
+
+        current = self._config_entry.options
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_DELIVERED_FILTER_TYPE,
+                        default=current.get(
+                            CONF_DELIVERED_FILTER_TYPE, DEFAULT_DELIVERED_FILTER_TYPE
+                        ),
+                    ): _FILTER_TYPE_SELECTOR,
+                    vol.Required(
+                        CONF_DELIVERED_FILTER_AMOUNT,
+                        default=current.get(
+                            CONF_DELIVERED_FILTER_AMOUNT,
+                            DEFAULT_DELIVERED_FILTER_AMOUNT,
+                        ),
+                    ): _FILTER_AMOUNT_SELECTOR,
+                }
+            ),
+        )

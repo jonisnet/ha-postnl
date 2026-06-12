@@ -45,6 +45,7 @@ async def async_setup_entry(
         f"{account_id}_next_delivery",
         f"{account_id}_en_route_to_service_point",
         f"{account_id}_outgoing_parcels",
+        f"{account_id}_delivered_parcels",
     }
     for entity_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
         if (
@@ -65,6 +66,7 @@ async def async_setup_entry(
         PostNLNextDeliverySensor(coordinator=coordinator, userinfo=userinfo),
         PostNLEnRouteToServicePointSensor(coordinator=coordinator, userinfo=userinfo),
         PostNLOutgoingParcelsSensor(coordinator=coordinator, userinfo=userinfo),
+        PostNLDeliveredParcelsSensor(coordinator=coordinator, userinfo=userinfo),
     ]
 
     for parcel in receiver_parcels:
@@ -316,5 +318,46 @@ class PostNLOutgoingParcelsSensor(CoordinatorEntity[PostNLCoordinator], SensorEn
                     "planned_to": p.get("planned_to"),
                 }
                 for p in self._active_sender()
+            ]
+        }
+
+
+class PostNLDeliveredParcelsSensor(CoordinatorEntity[PostNLCoordinator], SensorEntity):
+    """Sensor reporting recently delivered incoming PostNL parcels."""
+
+    _attr_name = "PostNL Delivered Parcels"
+    _attr_icon = "mdi:package-variant"
+    _attr_native_unit_of_measurement = "parcels"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(
+        self,
+        coordinator: PostNLCoordinator,
+        userinfo: dict[str, Any],
+    ) -> None:
+        super().__init__(coordinator)
+        account_id: str = userinfo.get("account_id", "")
+        self._attr_unique_id = f"{account_id}_delivered_parcels"
+        self._attr_device_info = _build_device_info(userinfo)
+
+    @property
+    def _parcels(self) -> list[dict]:
+        return self.coordinator.delivered_receiver or []
+
+    @property
+    def native_value(self) -> int:
+        return len(self._parcels)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            "parcels": [
+                {
+                    "barcode": p.get("barcode"),
+                    "sender": p.get("source_display_name"),
+                    "status": p.get("status_message"),
+                    "delivery_date": p.get("delivery_date"),
+                }
+                for p in self._parcels
             ]
         }

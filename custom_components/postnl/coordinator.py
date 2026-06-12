@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import requests
 from homeassistant.config_entries import ConfigEntry
@@ -12,11 +12,33 @@ from homeassistant.helpers.update_coordinator import (DataUpdateCoordinator,
                                                       UpdateFailed)
 
 from .auth import AsyncConfigEntryAuth
-from .const import DOMAIN, POLL_INTERVAL
+from .const import (
+    CONF_DELIVERED_FILTER_AMOUNT,
+    CONF_DELIVERED_FILTER_TYPE,
+    DEFAULT_DELIVERED_FILTER_AMOUNT,
+    DEFAULT_DELIVERED_FILTER_TYPE,
+    DOMAIN,
+    POLL_INTERVAL,
+)
 from .graphql import PostNLGraphql
 from .jouw_api import PostNLJouwAPI
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _delivery_dt(parcel: dict) -> datetime | None:
+    """Parse the delivery datetime from a transformed parcel dict."""
+    date_str = parcel.get("delivery_date")
+    if not date_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
 
 class PostNLCoordinator(DataUpdateCoordinator):
     data: dict[str, list[dict]]
@@ -32,6 +54,7 @@ class PostNLCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(seconds=POLL_INTERVAL),
         )
         self.config_entry = entry
+        self.delivered_receiver: list[dict] = []
         _LOGGER.debug("PostNLCoordinator initialized with update interval: %s", self.update_interval)
         
     async def _async_update_data(self) -> dict[str, list[dict]]:
@@ -60,7 +83,13 @@ class PostNLCoordinator(DataUpdateCoordinator):
                                 shipments.get('trackedShipments', {}).get('senderShipments', [])]
             data['sender'] = await asyncio.gather(*sender_shipments)
 
-            _LOGGER.info("Updated PostNL data: %d receiver packages, %d sender packages.", len(data['receiver']), len(data['sender']))
+            delivered_receiver = [p for p in data['receiver'] if p.get('delivered')]
+            self.delivered_receiver = self._apply_delivered_filter(delivered_receiver)
+
+            _LOGGER.info(
+                "Updated PostNL data: %d receiver packages, %d sender packages, %d delivered shown.",
+                len(data['receiver']), len(data['sender']), len(self.delivered_receiver),
+            )
 
             return data
         except ConfigEntryAuthFailed:
@@ -70,6 +99,18 @@ class PostNLCoordinator(DataUpdateCoordinator):
         except requests.exceptions.RequestException as exception:
             _LOGGER.error("Network error during PostNL data update: %s", exception, exc_info=True)
             raise UpdateFailed("Unable to update PostNL data") from exception
+
+    def _apply_delivered_filter(self, parcels: list[dict]) -> list[dict]:
+        """Trim the delivered receiver list according to the configured options."""
+        options = self.config_entry.options
+        filter_type = options.get(CONF_DELIVERED_FILTER_TYPE, DEFAULT_DELIVERED_FILTER_TYPE)
+        filter_amount = int(options.get(CONF_DELIVERED_FILTER_AMOUNT, DEFAULT_DELIVERED_FILTER_AMOUNT))
+
+        if filter_type == "days":
+            cutoff = datetime.now(timezone.utc) - timedelta(days=filter_amount)
+            return [p for p in parcels if (dt := _delivery_dt(p)) is None or dt >= cutoff]
+
+        return parcels[:filter_amount]
 
     async def transform_shipment(self, shipment) -> dict:
         _LOGGER.debug('Updating %s', shipment.get('key'))

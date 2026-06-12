@@ -44,7 +44,10 @@ A custom Home Assistant integration that tracks your incoming and outgoing PostN
 | `sensor.<account>_postnl_parcel_<barcode>` | Status of a single incoming shipment |
 | `sensor.<account>_postnl_next_delivery` | Earliest expected delivery datetime |
 | `sensor.<account>_postnl_en_route_to_postnl_point` | Parcels destined for a PostNL pickup point |
+| `sensor.<account>_postnl_delivered_parcels` | Recently delivered incoming parcels (configurable window) |
 | `sensor.<account>_postnl_outgoing_parcels` | Number of active outgoing shipments |
+
+The delivered-parcels filter (last N days, or N most recent) can be changed at any time via **Settings → Devices & Services → PostNL → Configure**. Changes take effect on the next refresh — no reload required.
 
 For full attribute reference and example automations see [docs/sensors.md](docs/sensors.md).
 

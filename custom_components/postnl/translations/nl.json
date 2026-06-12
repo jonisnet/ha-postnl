@@ -1,0 +1,57 @@
+{
+  "title": "PostNL",
+  "config": {
+    "step": {
+      "user": {
+        "title": "PostNL",
+        "description": "Voer je PostNL-accountgegevens in.",
+        "data": {
+          "username": "E-mailadres",
+          "password": "Wachtwoord"
+        }
+      },
+      "delivered": {
+        "title": "Bezorgde pakketten",
+        "data": {
+          "delivered_filter_type": "Filteren op",
+          "delivered_filter_amount": "Aantal"
+        },
+        "data_description": {
+          "delivered_filter_type": "Toon bezorgde pakketten van de afgelopen X dagen, of beperk tot de X meest recente.",
+          "delivered_filter_amount": "Aantal dagen of pakketten om weer te geven."
+        }
+      },
+      "reauth_confirm": {
+        "title": "PostNL — opnieuw inloggen vereist",
+        "description": "Je PostNL-sessie is verlopen. Voer je gegevens opnieuw in.",
+        "data": {
+          "username": "E-mailadres",
+          "password": "Wachtwoord"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Ongeldig e-mailadres of wachtwoord.",
+      "cannot_connect": "Kan geen verbinding maken met PostNL. Probeer het opnieuw."
+    },
+    "abort": {
+      "already_configured": "Dit account is al geconfigureerd.",
+      "reauth_successful": "Opnieuw inloggen geslaagd."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Bezorgde pakketten",
+        "data": {
+          "delivered_filter_type": "Filteren op",
+          "delivered_filter_amount": "Aantal"
+        },
+        "data_description": {
+          "delivered_filter_type": "Toon bezorgde pakketten van de afgelopen X dagen, of beperk tot de X meest recente.",
+          "delivered_filter_amount": "Aantal dagen of pakketten om weer te geven."
+        }
+      }
+    }
+  }
+}
