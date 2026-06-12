@@ -126,7 +126,11 @@ class PostNLCoordinator(DataUpdateCoordinator):
                     "url": shipment.get('detailsUrl'),
                     "shipment_type": shipment.get('shipmentType'),
                     "receiver_title": (shipment.get('receiverTitle') or '').strip() or None,
-                    "source_display_name": (shipment.get('sourceDisplayName') or '').strip() or None,
+                    "source_display_name": (
+                        (shipment.get('sourceDisplayName') or '').strip()
+                        or (shipment.get('title') or '').strip()
+                        or None
+                    ),
                     "status_message": "Pakket is bezorgd",
                     "delivered": shipment.get('delivered'),
                     "delivery_date": shipment.get('deliveredTimeStamp'),
@@ -180,7 +184,11 @@ class PostNLCoordinator(DataUpdateCoordinator):
                 "url": shipment.get('detailsUrl'),
                 "shipment_type": shipment.get('shipmentType'),
                 "receiver_title": (shipment.get('receiverTitle') or '').strip() or None,
-                "source_display_name": (shipment.get('sourceDisplayName') or '').strip() or None,
+                "source_display_name": (
+                        (shipment.get('sourceDisplayName') or '').strip()
+                        or (shipment.get('title') or '').strip()
+                        or None
+                    ),
                 "status_message": status_message,
                 "delivered": shipment.get('delivered'),
                 "delivery_date": shipment.get('deliveredTimeStamp'),

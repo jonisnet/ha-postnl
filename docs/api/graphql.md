@@ -155,7 +155,7 @@ fragment shipment on TrackedShipmentResultType {
 | `key` | string | Full shipment identifier in `{barcode}-{country}-{postalcode}` format, e.g. `3SABCD1234567890-NL-1234AB`. Used as the identifier for Track & Trace lookups and the `detailsUrl`. |
 | `creationDateTime` | string (ISO 8601 with TZ offset) | When the shipment was registered, e.g. `2026-05-28T08:17:22+02:00` |
 | `barcode` | string | The bare barcode without country/postcode suffix, e.g. `3SABCD1234567890`. Used to look up the matching entry in the Track & Trace `colli` response. |
-| `title` | string | Display name — typically the sender name. May have a leading space. |
+| `title` | string | Display name — typically the sender name. May have a leading space. The integration uses this as the parcel's sender because `sourceDisplayName` is always `null`. |
 | `delivered` | boolean | `true` when the parcel has been delivered. When `true`, no Track & Trace call is made. |
 | `deliveredTimeStamp` | string\|null | Actual delivery timestamp when `delivered` is `true`, e.g. `2026-05-29T14:34:26` (no TZ offset) |
 | `deliveryWindowFrom` | string\|null | Start of the estimated delivery window |
@@ -170,11 +170,12 @@ fragment shipment on TrackedShipmentResultType {
 
 ## How the integration uses this endpoint
 
-- `receiverShipments` → incoming parcel sensor (`PostNL_delivery`)
-- `senderShipments` → outgoing parcel sensor (`PostNL_distribution`)
-- `delivered: true` → parcel shown in `delivered` attribute; no Track & Trace call is made
-- `delivered: false` → parcel shown in `enroute`; a [Track & Trace](track_and_trace.md) call is made for live status
+- `receiverShipments` → incoming parcel sensors (`PostNLIncomingParcelsSensor`, `PostNLParcelSensor`, `PostNLDeliveredParcelsSensor`)
+- `senderShipments` → outgoing parcel sensor (`PostNLOutgoingParcelsSensor`)
+- `delivered: true` → parcel routed to the delivered list; no Track & Trace call is made
+- `delivered: false` → parcel routed to the active list; a [Track & Trace](track_and_trace.md) call is made for live status
 - `barcode` → key for the `colli` lookup in the Track & Trace response
+- `title` → `sender` attribute on the HA sensor entity (with a fallback chain through `sourceDisplayName` for forward compatibility)
 - `receiverTitle` → `receiver_title` attribute on the HA sensor entity
 
 ## Error handling
