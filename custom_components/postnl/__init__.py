@@ -1,6 +1,9 @@
+"""PostNL custom component for Home Assistant."""
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from typing import Any
 
 import requests
 import urllib3
@@ -9,18 +12,28 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady, HomeAssistantError
 
 from .auth import AsyncConfigEntryAuth
-from .const import DOMAIN, PLATFORMS
+from .const import PLATFORMS
 from .coordinator import PostNLCoordinator
 from .login_api import PostNLLoginAPI
 
 _LOGGER = logging.getLogger(__name__)
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+@dataclass
+class PostNLData:
+    """Runtime data attached to a PostNL config entry."""
+
+    auth: AsyncConfigEntryAuth
+    coordinator: PostNLCoordinator
+    userinfo: dict[str, Any]
+
+
+type PostNLConfigEntry = ConfigEntry[PostNLData]
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: PostNLConfigEntry) -> bool:
     """Set up PostNL from config entry."""
     _LOGGER.debug("Setup Entry PostNL")
-
-    hass.data.setdefault(DOMAIN, {})
 
     auth = AsyncConfigEntryAuth(hass, entry)
 
@@ -28,8 +41,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await auth.check_and_refresh_token()
     except HomeAssistantError as exception:
         raise ConfigEntryAuthFailed("Unable to authenticate with PostNL") from exception
-
-    hass.data[DOMAIN][entry.entry_id] = {"auth": auth}
 
     postnl_login_api = PostNLLoginAPI(auth.access_token)
 
@@ -41,30 +52,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if "error" in userinfo:
         raise ConfigEntryNotReady("Error in retrieving user information from PostNL.")
 
-    hass.data[DOMAIN][entry.entry_id]["userinfo"] = userinfo
-
     coordinator = PostNLCoordinator(hass, entry)
-    hass.data[DOMAIN][entry.entry_id]["coordinator"] = coordinator
+    entry.runtime_data = PostNLData(auth=auth, coordinator=coordinator, userinfo=userinfo)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
     entry.async_on_unload(entry.add_update_listener(_async_update_options))
-
     return True
 
 
-async def _async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
+async def _async_update_options(hass: HomeAssistant, entry: PostNLConfigEntry) -> None:
     """Refresh the coordinator immediately when options are changed."""
-    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
-    await coordinator.async_request_refresh()
+    await entry.runtime_data.coordinator.async_request_refresh()
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: PostNLConfigEntry) -> bool:
     """Unload PostNL config entry."""
     _LOGGER.debug("Unloading PostNL integration")
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-
-    if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id)
-
-    return unload_ok
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

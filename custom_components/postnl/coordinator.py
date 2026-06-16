@@ -119,7 +119,7 @@ class PostNLCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> dict[str, list[dict]]:
         _LOGGER.debug("Starting data update for PostNL.")
         try:
-            auth: AsyncConfigEntryAuth = self.hass.data[DOMAIN][self.config_entry.entry_id]['auth']
+            auth: AsyncConfigEntryAuth = self.config_entry.runtime_data.auth
             _LOGGER.debug("Authenticating with PostNL API.")
             await auth.check_and_refresh_token()
 
@@ -157,12 +157,14 @@ class PostNLCoordinator(DataUpdateCoordinator):
             )
 
             return data
-        except ConfigEntryAuthFailed:
+        except ConfigEntryAuthFailed as exception:
+            _LOGGER.error("PostNL authentication failed: %s", exception)
             raise
         except HomeAssistantError as exception:
+            _LOGGER.error("PostNL authentication error: %s", exception)
             raise UpdateFailed("Authentication failed") from exception
         except requests.exceptions.RequestException as exception:
-            _LOGGER.error("Network error during PostNL data update: %s", exception, exc_info=True)
+            _LOGGER.warning("PostNL endpoint unreachable: %s", exception)
             raise UpdateFailed("Unable to update PostNL data") from exception
 
     def _apply_delivered_filter(self, parcels: list[dict]) -> list[dict]:

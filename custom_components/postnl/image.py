@@ -5,13 +5,13 @@ import logging
 from typing import Any
 
 from homeassistant.components.image import ImageEntity
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
+from . import PostNLConfigEntry
 from .const import DOMAIN
 from .coordinator import PostNLCoordinator
 from .sensor import _build_device_info
@@ -21,14 +21,14 @@ _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: PostNLConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up one image entity per MyMail letter and keep them in sync."""
-    data = hass.data[DOMAIN][entry.entry_id]
-    userinfo: dict[str, Any] = data.get("userinfo", {})
+    data = entry.runtime_data
+    userinfo: dict[str, Any] = data.userinfo
     account_id: str = userinfo.get("account_id", "")
-    coordinator: PostNLCoordinator = data["coordinator"]
+    coordinator = data.coordinator
 
     # Ensure coordinator.letters is populated before we try to add entities —
     # adding image entities from a post-setup listener callback leaves them

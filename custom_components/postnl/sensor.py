@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceEntryType
@@ -14,6 +13,7 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from . import PostNLConfigEntry
 from .const import DOMAIN
 from .coordinator import PostNLCoordinator
 
@@ -21,18 +21,21 @@ _LOGGER = logging.getLogger(__name__)
 
 DELIVERY_ADDRESS_SERVICE_POINT = "ServicePoint"
 
+# The DataUpdateCoordinator handles fan-out; HA's per-entity throttling adds nothing.
+PARALLEL_UPDATES = 0
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: PostNLConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up PostNL sensor entities from a config entry."""
-    data = hass.data[DOMAIN][entry.entry_id]
-    userinfo: dict[str, Any] = data.get("userinfo", {})
+    data = entry.runtime_data
+    userinfo: dict[str, Any] = data.userinfo
     account_id: str = userinfo.get("account_id", "")
 
-    coordinator: PostNLCoordinator = data["coordinator"]
+    coordinator = data.coordinator
     await coordinator.async_config_entry_first_refresh()
 
     receiver_parcels: list[dict] = _active_receiver(coordinator)
@@ -97,9 +100,9 @@ def _active_receiver(coordinator: PostNLCoordinator) -> list[dict]:
 class PostNLIncomingParcelsSensor(CoordinatorEntity[PostNLCoordinator], SensorEntity):
     """Summary sensor for active incoming PostNL parcels.
 
-    Also manages the lifecycle of per-parcel :class:`PostNLParcelSensor`
-    entities: new barcodes are added and delivered barcodes are removed from
-    the entity registry whenever the coordinator data changes.
+    Spawns a per-parcel :class:`PostNLParcelSensor` whenever a new barcode
+    appears. Stale per-parcel sensors remove themselves once their barcode
+    drops out of the coordinator data — see ``PostNLParcelSensor``.
     """
 
     _attr_name = "PostNL Incoming Parcels"
@@ -131,24 +134,18 @@ class PostNLIncomingParcelsSensor(CoordinatorEntity[PostNLCoordinator], SensorEn
         return {"parcels": _active_receiver(self.coordinator)}
 
     def _handle_coordinator_update(self) -> None:
-        current_parcels = _active_receiver(self.coordinator)
-        current_barcodes = {p["barcode"] for p in current_parcels if p.get("barcode")}
+        current_barcodes = {
+            p["barcode"]
+            for p in _active_receiver(self.coordinator)
+            if p.get("barcode")
+        }
 
         new_barcodes = current_barcodes - self._known_barcodes
         if new_barcodes:
-            self._async_add_entities([
+            self._async_add_entities(
                 PostNLParcelSensor(coordinator=self.coordinator, userinfo=self._userinfo, barcode=b)
                 for b in new_barcodes
-            ])
-
-        stale_barcodes = self._known_barcodes - current_barcodes
-        if stale_barcodes and self.hass is not None:
-            registry = er.async_get(self.hass)
-            account_id: str = self._userinfo.get("account_id", "")
-            for barcode in stale_barcodes:
-                entity_id = registry.async_get_entity_id("sensor", DOMAIN, f"{account_id}_{barcode}")
-                if entity_id:
-                    registry.async_remove(entity_id)
+            )
 
         self._known_barcodes = current_barcodes
         super()._handle_coordinator_update()
@@ -187,6 +184,13 @@ class PostNLParcelSensor(CoordinatorEntity[PostNLCoordinator], SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         parcel = self._get_parcel()
         return dict(parcel) if parcel else {}
+
+    def _handle_coordinator_update(self) -> None:
+        """Self-remove once this parcel falls out of the coordinator data."""
+        if self._get_parcel() is None and self.hass is not None:
+            self.hass.async_create_task(self.async_remove(force_remove=True))
+            return
+        super()._handle_coordinator_update()
 
 
 class PostNLNextDeliverySensor(CoordinatorEntity[PostNLCoordinator], SensorEntity):
