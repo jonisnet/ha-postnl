@@ -1,0 +1,31 @@
+# Notify when a PostNL parcel arrives at a PostNL Point and is ready to
+# be collected. Triggers on the canonical at_pickup_point status, which
+# the integration maps from PostNL's Dutch status strings (e.g. "Pakket
+# ligt klaar bij PostNL punt"). If only the broader "destined for a
+# PostNL Point" signal is what you want, swap the trigger for a
+# template condition on `pickup`.
+
+alias: "PostNL: parcel ready at PostNL Point"
+description: Notify when a PostNL parcel is ready for collection at a PostNL Point.
+mode: queued
+max: 10
+
+triggers:
+  - trigger: event
+    event_type: postnl_parcel_status_changed
+    event_data:
+      new_status: at_pickup_point
+
+actions:
+  - action: notify.mobile_app
+    data:
+      title: "Pakket ligt klaar bij PostNL Punt"
+      message: >-
+        {{ trigger.event.data.sender or 'Onbekende afzender' }} ligt klaar
+        {% if trigger.event.data.pickup_point %}
+        bij {{ trigger.event.data.pickup_point }}.
+        {% else %}
+        bij een PostNL Punt.
+        {% endif %}
+      data:
+        clickAction: "{{ trigger.event.data.url }}"

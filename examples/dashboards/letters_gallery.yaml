@@ -1,0 +1,29 @@
+# Picture-glance gallery of recently announced MyMail letters. Each
+# letter has its own `image.postnl_letter_<editId>` entity — paste this
+# into the raw YAML editor and the integration auto-creates one entity
+# per announced letter.
+#
+# This grid card iterates over the letters attribute and references the
+# matching image entity by its editId-derived unique part. If your
+# entity_ids differ, adjust the slug template accordingly.
+
+type: grid
+title: Aangekondigde brieven
+square: false
+columns: 2
+cards:
+  - type: markdown
+    content: >-
+      {% set letters = state_attr('sensor.postnl_letters', 'letters') or [] %}
+      {% if letters %}
+      {{ letters | length }} aangekondigd, waarvan
+      {{ letters | selectattr('unread', 'equalto', true) | list | length }}
+      nog ongelezen.
+      {% else %}
+      Geen brieven aangekondigd.
+      {% endif %}
+  - type: picture-glance
+    title: Laatste brief
+    image: /local/postnl_placeholder.png  # replace with any fallback you like
+    entities: []
+    camera_image: image.postnl_letter
