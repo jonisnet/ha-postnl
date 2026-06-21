@@ -1,21 +1,23 @@
-# PostNL Home Assistant Integration
+# PostNL Parcel Tracker
 
-A custom Home Assistant integration that tracks your incoming and outgoing PostNL shipments.
+A custom Home Assistant integration that tracks your PostNL shipments
+and announced MyMail letters.
 
 ## Features
 
-- Incoming and outgoing parcel count sensors
-- Per-parcel sensor per active incoming shipment
+- Incoming and outgoing active-parcel count sensors
+- Per-parcel sensor per active incoming shipment, with full status details as attributes
+- Configurable delivered-parcels sensor (last N days, or N most recent)
 - Next delivery datetime sensor (device class `timestamp`)
-- PostNL point sensor — parcels destined for a PostNL pickup point
-- Letters sensor — count of announced letters from PostNL's MyMail service
-- Per-letter image entity — the scanned photo of each announced letter, served through Home Assistant
-- Automatic lifecycle management — sensors are created and removed as parcels move through delivery
+- PostNL Punt sensor — parcels destined for a PostNL Point pickup location
+- MyMail letters sensor plus a per-letter image entity holding the scanned photo
+- Automatic lifecycle management — per-parcel sensors are created and removed as parcels move through delivery
+- Re-authentication support — silently refreshes the PostNL token, prompts only when the refresh fails
 
 ## Requirements
 
-- Home Assistant 2024.1 or newer
-- A [PostNL](https://jouw.postnl.nl) account
+- Home Assistant 2024.7 or newer
+- A [PostNL](https://jouw.postnl.nl) account (the credentials you use on jouw.postnl.nl / the PostNL mobile app)
 
 ## Installation
 
@@ -36,31 +38,177 @@ A custom Home Assistant integration that tracks your incoming and outgoing PostN
 1. Go to **Settings → Devices & Services → Add Integration**
 2. Search for **PostNL**
 3. Enter your PostNL **email address** and **password**
-4. Click **Submit**
+4. Choose how you want the **delivered parcels** sensor to filter (last N days, or N most recent)
+5. Click **Submit**
+
+### Setup parameters
+
+| Field | Description |
+|---|---|
+| Email | The email address of your PostNL account. |
+| Password | The password for that account. Stored in the HA config entry and refreshed automatically when the integration triggers a re-authentication. |
+
+## Options
+
+Click **Configure** on the integration card to change the delivered-parcels filter:
+
+| Option | Description |
+|---|---|
+| Filter by | `Days` keeps delivered parcels visible for the last N days. `Number of parcels` keeps only the N most recent regardless of age. |
+| Amount | The N used by the filter above. |
+
+Changes take effect on the next refresh — no reload required.
+
+## Removal
+
+Standard HA removal applies: **Settings → Devices & Services →
+PostNL → ⋮ → Delete**. No PostNL-side cleanup is needed; deleting the
+config entry stops the polling. To revoke API access entirely, change
+your PostNL account password — the integration will trigger a re-auth
+notification, which you can then ignore.
 
 ## Sensors
 
-| Entity | Description |
-|--------|-------------|
-| `sensor.<account>_postnl_incoming_parcels` | Number of active incoming parcels |
-| `sensor.<account>_postnl_parcel_<barcode>` | Status of a single incoming shipment |
-| `sensor.<account>_postnl_next_delivery` | Earliest expected delivery datetime |
-| `sensor.<account>_postnl_en_route_to_postnl_point` | Parcels destined for a PostNL pickup point |
-| `sensor.<account>_postnl_delivered_parcels` | Recently delivered incoming parcels (configurable window) |
-| `sensor.<account>_postnl_outgoing_parcels` | Number of active outgoing shipments |
-| `sensor.<account>_postnl_letters` | Letters announced by PostNL's MyMail service over the last 2 weeks; `unread` count and `letters` list on attributes |
-| `image.<account>_postnl_letter_<title>` | Scanned photo of a single announced letter, fetched with your token and served through Home Assistant |
+The integration creates one device per PostNL account, named
+**`PostNL (<your-email>)`**. With multiple accounts each gets its own
+device named after its email. The entities below show the
+friendly-name pattern; their entity_ids carry the same account suffix:
 
-The image URL returned by PostNL's MyMail service requires the bearer token, so it cannot be loaded directly in a dashboard. The integration fetches the bytes itself and exposes each letter as an `image` entity instead. Show one with the built-in image card:
+| Friendly name pattern | Description |
+|---|---|
+| `PostNL (account) Incoming parcels` | Number of active incoming parcels |
+| `PostNL (account) Parcel <barcode>` | Canonical status of a single incoming shipment |
+| `PostNL (account) Next delivery` | Earliest expected delivery datetime |
+| `PostNL (account) En route to PostNL Point` | Active incoming parcels destined for a PostNL Point pickup location |
+| `PostNL (account) Delivered parcels` | Recently delivered parcels (configurable window) |
+| `PostNL (account) Outgoing parcels` | Number of active outgoing parcels |
+| `PostNL (account) Letters` | Letters announced by PostNL's MyMail service over the last ~2 weeks; `unread` count and `letters` list on attributes |
+| `PostNL (account) Letter <title>` (image entity) | Scanned photo of a single announced letter, fetched with your token and served through Home Assistant |
 
-```yaml
-type: image
-entity: image.<account>_postnl_letter_<title>
-```
+Every parcel exposed on a sensor attribute uses a carrier-agnostic shape:
 
-The delivered-parcels filter (last N days, or N most recent) can be changed at any time via **Settings → Devices & Services → PostNL → Configure**. Changes take effect on the next refresh — no reload required.
+| Key | Type | Meaning |
+|---|---|---|
+| `carrier` | string | `"PostNL"` |
+| `barcode` | string | Parcel tracking number |
+| `sender` | string \| null | Sender name (e.g. webshop) |
+| `status` | `ParcelStatus` | Canonical status — see the [status reference](#parcel-status-reference) |
+| `raw_status` | string \| null | Original PostNL `statusPhase.message` (a Dutch human-readable string) |
+| `delivered` | bool | Whether the parcel has been delivered |
+| `delivered_at` | ISO 8601 \| null | Delivery moment, if known |
+| `planned_from` | ISO 8601 \| null | Expected delivery window start |
+| `planned_to` | ISO 8601 \| null | Expected delivery window end |
+| `pickup` | bool | Destined for a PostNL Point rather than a home address |
+| `pickup_point` | string \| null | PostNL Point name when `pickup` is true (always `null` for now — PostNL has not yet exposed the field) |
+| `url` | string \| null | Deep link to the parcel's tracking page on jouw.postnl.nl |
+| `raw` | dict | The full transformed PostNL payload (GraphQL shipment fields + Track & Trace `colli` data combined) |
 
-For full attribute reference and example automations see [docs/sensors.md](docs/sensors.md).
+This is the same shape DHL and DPD use, so the
+[parcel aggregator](https://github.com/peternijssen/ha-parcel-aggregator)
+and any cross-carrier dashboard can read parcels from all three
+integrations the same way.
+
+The image URL returned by PostNL's MyMail service requires the bearer
+token, so it cannot be loaded directly in a dashboard. The integration
+fetches the bytes itself and exposes each letter as an `image` entity
+instead — show one with the built-in image card.
+
+For full attribute reference and example automations see
+[docs/sensors.md](docs/sensors.md) — or the
+[examples folder](examples/) for ready-to-paste automation and
+dashboard snippets.
+
+## Parcel status reference
+
+`status` on every parcel is one of the canonical `ParcelStatus` values
+below. Use these in your automations rather than PostNL's raw Dutch
+description — the raw value stays available on `raw_status` for power
+users.
+
+| `status` | Meaning | PostNL signal that maps here |
+|---|---|---|
+| `registered` | PostNL knows about the label but the parcel is not yet in transit | `statusPhase.message` containing "aangemeld" or "verwacht" |
+| `in_transit` | Picked up; somewhere in PostNL's network | `statusPhase.message` containing "onderweg", "ontvangen" or "gesorteerd" |
+| `out_for_delivery` | On the delivery vehicle today | `statusPhase.message` containing "wordt vandaag bezorgd", "onderweg naar het bezorgadres" or "onderweg naar de bezorger" |
+| `at_pickup_point` | Arrived at the chosen PostNL Point, ready to be collected | `statusPhase.message` containing "ligt klaar bij postnl punt" or similar |
+| `delivered` | Handed over (mailbox, recipient, neighbour, picked up) | `shipment.delivered == true` (authoritative); fallback `statusPhase.message` containing "bezorgd" |
+| `returning` | Failed delivery, on the way back to the sender | `statusPhase.message` containing "retour" or "teruggestuurd" |
+| `unknown` | Raw description we have not mapped yet | anything else — logged once at info level so it can be added to the map |
+
+Because PostNL's `statusPhase.message` is a human-readable Dutch string
+(not a stable API enum), the mapping uses ordered substring matching
+— so minor wording variants still resolve correctly. If you see an
+`unknown` for a status the integration ought to recognise, open an
+issue with the raw value (visible in the integration debug logs and on
+the parcel sensor under `raw_status`).
+
+## Events
+
+The coordinator fires events on the HA event bus when something
+interesting happens to a parcel, so automations can react without
+polling per-parcel sensors.
+
+| Event | When | Payload |
+|---|---|---|
+| `postnl_parcel_registered` | A new barcode appears in the active list | The full normalised parcel dict (`carrier`, `barcode`, `sender`, `status`, `raw_status`, `delivered`, `delivered_at`, `planned_from`, `planned_to`, `pickup`, `pickup_point`, `url`, `raw`) |
+| `postnl_parcel_status_changed` | A known barcode's canonical `status` value changes | Same payload plus `old_status` and `new_status` |
+
+The coordinator suppresses events on the very first refresh after
+start-up so you don't get a stampede of "registered" events for
+parcels that were already in your account before HA started.
+
+See [`examples/automations/`](examples/automations/) for ready-to-paste
+event-driven automations, or the
+[parcel aggregator](https://github.com/peternijssen/ha-parcel-aggregator)
+for a carrier-agnostic re-emit layer that fires
+`parcel_aggregator_parcel_*` events covering every installed carrier
+in one go.
+
+## Examples
+
+The [`examples/`](examples/) folder ships ready-to-paste snippets for
+both automations and dashboards. Highlights:
+
+- [`examples/automations/notify_when_parcel_registered.yaml`](examples/automations/notify_when_parcel_registered.yaml) — push when PostNL announces a new parcel.
+- [`examples/automations/notify_when_out_for_delivery.yaml`](examples/automations/notify_when_out_for_delivery.yaml) — alert once per parcel when it's on the truck today.
+- [`examples/automations/notify_when_at_pickup_point.yaml`](examples/automations/notify_when_at_pickup_point.yaml) — alert when a parcel arrives at a PostNL Point.
+- [`examples/automations/announce_delivery_window.yaml`](examples/automations/announce_delivery_window.yaml) — TTS announcement an hour before the next planned delivery.
+- [`examples/automations/notify_when_letter_arrives.yaml`](examples/automations/notify_when_letter_arrives.yaml) — push when MyMail announces a new letter for today.
+- [`examples/dashboards/active_parcels_grid.yaml`](examples/dashboards/active_parcels_grid.yaml) — markdown card listing every active parcel with sender, canonical status and tracking link.
+- [`examples/dashboards/summary_glance.yaml`](examples/dashboards/summary_glance.yaml) — compact 4-column glance row with the day-to-day counters (parcels, PostNL Point, recent, letters).
+- [`examples/dashboards/next_delivery_countdown.yaml`](examples/dashboards/next_delivery_countdown.yaml) — entities card showing the next expected delivery and details.
+- [`examples/dashboards/letters_gallery.yaml`](examples/dashboards/letters_gallery.yaml) — picture gallery of recently announced MyMail letters.
+
+### Community Lovelace cards
+
+If you want a richer UI than the snippets above, two third-party cards
+work nicely with this integration's sensors:
+
+- [klaptafel/ha-package-tracker-card](https://github.com/klaptafel/ha-package-tracker-card) — purpose-built card for parcel integrations; renders each parcel with sender, status and tracking link.
+- [jimz011/hki-elements](https://github.com/jimz011/hki-elements) — collection of Home Kit-style elements that pair well with the per-parcel sensors for a cleaner dashboard.
+
+Both are maintained by their respective authors — please raise UI issues
+in those repos.
+
+## Debugging
+
+To capture verbose information about the PostNL API responses (useful
+when reporting a bug or helping map a new status value), enable debug
+logging for the integration:
+
+1. Add this to your `configuration.yaml`:
+   ```yaml
+   logger:
+     default: warning
+     logs:
+       custom_components.postnl: debug
+   ```
+2. Restart Home Assistant.
+3. Wait for the next poll cycle (or reload the integration from **Settings → Devices & Services → PostNL → ⋮ → Reload**).
+4. Open **Settings → System → Logs**, filter for `postnl`, and copy the relevant log lines (including the `Shipments fetched: ...` summary and any `Track and Trace response: ...` payload) into your bug report or message to the maintainer.
+
+The API endpoints used by the integration are documented under
+[`docs/api/`](docs/api/) for anyone interested in how the bytes flow.
 
 ## Troubleshooting
 
@@ -68,7 +216,8 @@ For full attribute reference and example automations see [docs/sensors.md](docs/
 |---------|--------------|
 | `invalid_auth` error during setup | Wrong email or password |
 | `cannot_connect` error during setup | PostNL API is unreachable; check your network |
-| Sensors disappear after delivery | Expected — delivered shipments are filtered out |
+| Re-authentication prompt appears | PostNL session expired and could not be refreshed silently; log in again |
+| Sensors disappear after delivery | Expected — delivered parcels move to the delivered sensor (visible window controlled by the options filter) |
 | Sensors not updating | Check **Settings → System → Logs** for `postnl` entries |
 
 ## Related integrations
@@ -81,9 +230,18 @@ Tracking parcels from other Dutch carriers:
 
 ## Disclaimer
 
-This is an independent, community-built project with no affiliation, endorsement, or connection to PostNL or any of its subsidiaries. The PostNL API is undocumented and may change without notice.
+This is an independent, community-built project with no affiliation,
+endorsement, or connection to PostNL or any of its subsidiaries. The
+PostNL API used here is undocumented (reverse-engineered from the
+mobile app and jouw.postnl.nl) and may change without notice.
 
 ## Contributing
+
+This fork is maintained by [@peternijssen](https://github.com/peternijssen).
+The original integration is by
+[@arjenbos](https://github.com/arjenbos) — fixes that apply to both
+forks are filed as PRs against the upstream
+[`arjenbos/ha-postnl`](https://github.com/arjenbos/ha-postnl).
 
 Pull requests and issues are welcome. Please open an issue before submitting a large change.
 
