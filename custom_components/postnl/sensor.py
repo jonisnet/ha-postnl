@@ -19,8 +19,6 @@ from .coordinator import PostNLCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-DELIVERY_ADDRESS_SERVICE_POINT = "ServicePoint"
-
 # The DataUpdateCoordinator handles fan-out; HA's per-entity throttling adds nothing.
 PARALLEL_UPDATES = 0
 
@@ -83,9 +81,10 @@ async def async_setup_entry(
 
 def _build_device_info(userinfo: dict[str, Any]) -> DeviceInfo:
     """Return DeviceInfo shared by all sensors for this account."""
+    email = userinfo.get("email") or ""
     return DeviceInfo(
         identifiers={(DOMAIN, userinfo.get("account_id", ""))},
-        name=userinfo.get("email"),
+        name=f"PostNL ({email})" if email else "PostNL",
         manufacturer="PostNL",
         entry_type=DeviceEntryType.SERVICE,
         configuration_url="https://jouw.postnl.nl",
@@ -105,9 +104,8 @@ class PostNLIncomingParcelsSensor(CoordinatorEntity[PostNLCoordinator], SensorEn
     drops out of the coordinator data — see ``PostNLParcelSensor``.
     """
 
-    _attr_name = "PostNL Incoming Parcels"
-    _attr_icon = "mdi:package-variant-closed"
-    _attr_native_unit_of_measurement = "parcels"
+    _attr_has_entity_name = True
+    _attr_translation_key = "incoming_parcels"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_attribution = "Data provided by PostNL"
     _unrecorded_attributes = frozenset({"parcels"})
@@ -156,8 +154,10 @@ class PostNLIncomingParcelsSensor(CoordinatorEntity[PostNLCoordinator], SensorEn
 class PostNLParcelSensor(CoordinatorEntity[PostNLCoordinator], SensorEntity):
     """Per-parcel sensor for a single active incoming PostNL shipment."""
 
-    _attr_icon = "mdi:package-variant-closed"
+    _attr_has_entity_name = True
+    _attr_translation_key = "parcel"
     _attr_attribution = "Data provided by PostNL"
+    _unrecorded_attributes = frozenset({"raw"})
 
     def __init__(
         self,
@@ -169,7 +169,7 @@ class PostNLParcelSensor(CoordinatorEntity[PostNLCoordinator], SensorEntity):
         self._barcode = barcode
         account_id: str = userinfo.get("account_id", "")
         self._attr_unique_id = f"{account_id}_{barcode}"
-        self._attr_name = f"PostNL Parcel {barcode}"
+        self._attr_translation_placeholders = {"barcode": barcode}
         self._attr_device_info = _build_device_info(userinfo)
 
     def _get_parcel(self) -> dict | None:
@@ -181,7 +181,7 @@ class PostNLParcelSensor(CoordinatorEntity[PostNLCoordinator], SensorEntity):
     @property
     def native_value(self) -> str | None:
         parcel = self._get_parcel()
-        return parcel.get("status_message") if parcel else None
+        return parcel.get("status") if parcel else None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -199,8 +199,8 @@ class PostNLParcelSensor(CoordinatorEntity[PostNLCoordinator], SensorEntity):
 class PostNLNextDeliverySensor(CoordinatorEntity[PostNLCoordinator], SensorEntity):
     """Sensor reporting the earliest expected delivery datetime across all active incoming parcels."""
 
-    _attr_name = "PostNL Next Delivery"
-    _attr_icon = "mdi:clock-fast"
+    _attr_has_entity_name = True
+    _attr_translation_key = "next_delivery"
     _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_attribution = "Data provided by PostNL"
 
@@ -217,7 +217,7 @@ class PostNLNextDeliverySensor(CoordinatorEntity[PostNLCoordinator], SensorEntit
     def _delivery_moments(self) -> list[tuple[datetime, dict]]:
         result: list[tuple[datetime, dict]] = []
         for parcel in _active_receiver(self.coordinator):
-            moment_str = parcel.get("planned_from") or parcel.get("planned_date")
+            moment_str = parcel.get("planned_from")
             if not moment_str:
                 continue
             try:
@@ -242,16 +242,15 @@ class PostNLNextDeliverySensor(CoordinatorEntity[PostNLCoordinator], SensorEntit
         _, earliest = min(moments, key=lambda x: x[0])
         return {
             "barcode": earliest.get("barcode"),
-            "sender": earliest.get("source_display_name"),
+            "sender": earliest.get("sender"),
         }
 
 
 class PostNLEnRouteToServicePointSensor(CoordinatorEntity[PostNLCoordinator], SensorEntity):
     """Sensor reporting active incoming parcels destined for a PostNL point."""
 
-    _attr_name = "PostNL Parcels En Route to PostNL Point"
-    _attr_icon = "mdi:truck-delivery"
-    _attr_native_unit_of_measurement = "parcels"
+    _attr_has_entity_name = True
+    _attr_translation_key = "en_route_to_service_point"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_attribution = "Data provided by PostNL"
     _unrecorded_attributes = frozenset({"parcels"})
@@ -267,10 +266,7 @@ class PostNLEnRouteToServicePointSensor(CoordinatorEntity[PostNLCoordinator], Se
         self._attr_device_info = _build_device_info(userinfo)
 
     def _get_service_point_parcels(self) -> list[dict]:
-        return [
-            p for p in _active_receiver(self.coordinator)
-            if p.get("delivery_address_type") == DELIVERY_ADDRESS_SERVICE_POINT
-        ]
+        return [p for p in _active_receiver(self.coordinator) if p.get("pickup")]
 
     @property
     def native_value(self) -> int:
@@ -278,27 +274,17 @@ class PostNLEnRouteToServicePointSensor(CoordinatorEntity[PostNLCoordinator], Se
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        return {
-            "parcels": [
-                {
-                    "barcode": p.get("barcode"),
-                    "sender": p.get("source_display_name"),
-                    "status": p.get("status_message"),
-                }
-                for p in self._get_service_point_parcels()
-            ]
-        }
+        return {"parcels": self._get_service_point_parcels()}
 
 
 class PostNLOutgoingParcelsSensor(CoordinatorEntity[PostNLCoordinator], SensorEntity):
     """Summary sensor for active outgoing PostNL shipments."""
 
-    _attr_name = "PostNL Outgoing Parcels"
-    _attr_icon = "mdi:package-variant-closed"
-    _attr_native_unit_of_measurement = "parcels"
+    _attr_has_entity_name = True
+    _attr_translation_key = "outgoing_parcels"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_attribution = "Data provided by PostNL"
-    _unrecorded_attributes = frozenset({"shipments"})
+    _unrecorded_attributes = frozenset({"parcels"})
 
     def __init__(
         self,
@@ -319,29 +305,14 @@ class PostNLOutgoingParcelsSensor(CoordinatorEntity[PostNLCoordinator], SensorEn
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        return {
-            "shipments": [
-                {
-                    "barcode": p.get("barcode"),
-                    "key": p.get("key"),
-                    "status": p.get("status_message"),
-                    "shipment_type": p.get("shipment_type"),
-                    "receiver": p.get("receiver_title"),
-                    "planned_date": p.get("planned_date"),
-                    "planned_from": p.get("planned_from"),
-                    "planned_to": p.get("planned_to"),
-                }
-                for p in self._active_sender()
-            ]
-        }
+        return {"parcels": self._active_sender()}
 
 
 class PostNLDeliveredParcelsSensor(CoordinatorEntity[PostNLCoordinator], SensorEntity):
     """Sensor reporting recently delivered incoming PostNL parcels."""
 
-    _attr_name = "PostNL Delivered Parcels"
-    _attr_icon = "mdi:package-variant"
-    _attr_native_unit_of_measurement = "parcels"
+    _attr_has_entity_name = True
+    _attr_translation_key = "delivered_parcels"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_attribution = "Data provided by PostNL"
     _unrecorded_attributes = frozenset({"parcels"})
@@ -366,25 +337,14 @@ class PostNLDeliveredParcelsSensor(CoordinatorEntity[PostNLCoordinator], SensorE
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        return {
-            "parcels": [
-                {
-                    "barcode": p.get("barcode"),
-                    "sender": p.get("source_display_name"),
-                    "status": p.get("status_message"),
-                    "delivery_date": p.get("delivery_date"),
-                }
-                for p in self._parcels
-            ]
-        }
+        return {"parcels": self._parcels}
 
 
 class PostNLLettersSensor(CoordinatorEntity[PostNLCoordinator], SensorEntity):
     """Sensor reporting letters announced by PostNL's MyMail service."""
 
-    _attr_name = "PostNL Letters"
-    _attr_icon = "mdi:email"
-    _attr_native_unit_of_measurement = "letters"
+    _attr_has_entity_name = True
+    _attr_translation_key = "letters"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_attribution = "Data provided by PostNL"
     _unrecorded_attributes = frozenset({"letters"})

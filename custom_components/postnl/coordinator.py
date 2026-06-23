@@ -19,6 +19,7 @@ from .const import (
     DEFAULT_DELIVERED_FILTER_TYPE,
     DOMAIN,
     POLL_INTERVAL,
+    ParcelStatus,
 )
 from .graphql import PostNLGraphql
 from .jouw_api import PostNLJouwAPI
@@ -26,9 +27,97 @@ from .jouw_api import PostNLJouwAPI
 _LOGGER = logging.getLogger(__name__)
 
 
+# PostNL's status comes from two signals:
+#   - shipment.delivered (bool, GraphQL) — terminal indicator
+#   - colli.statusPhase.message (Track & Trace) — Dutch human-readable string
+#
+# statusPhase.message is not under an API contract: PostNL changes the wording
+# at will. So we substring-match against the meaningful subphrase rather than
+# look up against a fixed enum. Order matters — first match wins, so the more
+# specific patterns must come before the broader ones (e.g. "wordt vandaag
+# bezorgd" before "bezorgd").
+_STATUS_PATTERNS: tuple[tuple[str, ParcelStatus], ...] = (
+    ("ligt klaar bij postnl punt", ParcelStatus.AT_PICKUP_POINT),
+    ("afgeleverd op postnl punt", ParcelStatus.AT_PICKUP_POINT),
+    ("klaar bij postnl punt", ParcelStatus.AT_PICKUP_POINT),
+    ("teruggestuurd", ParcelStatus.RETURNING),
+    ("retour", ParcelStatus.RETURNING),
+    ("wordt vandaag bezorgd", ParcelStatus.OUT_FOR_DELIVERY),
+    ("onderweg naar het bezorgadres", ParcelStatus.OUT_FOR_DELIVERY),
+    ("onderweg naar de bezorger", ParcelStatus.OUT_FOR_DELIVERY),
+    ("aangemeld", ParcelStatus.REGISTERED),
+    ("verwacht", ParcelStatus.REGISTERED),
+    ("ontvangen", ParcelStatus.IN_TRANSIT),
+    ("gesorteerd", ParcelStatus.IN_TRANSIT),
+    ("onderweg", ParcelStatus.IN_TRANSIT),
+    ("bezorgd", ParcelStatus.DELIVERED),
+)
+
+_LOGGED_UNKNOWN_STATUSES: set[str] = set()
+
+
+def map_parcel_status(parcel: dict) -> ParcelStatus:
+    """Map a PostNL parcel dict to a canonical :class:`ParcelStatus`.
+
+    ``parcel`` is the intermediate dict built by :meth:`transform_shipment`
+    with at least ``delivered`` (bool) and ``status_message`` (str) populated.
+    The ``delivered`` flag from GraphQL is authoritative and short-circuits to
+    :attr:`ParcelStatus.DELIVERED`. Anything that does not match any pattern
+    is reported as :attr:`ParcelStatus.UNKNOWN` and surfaced once at info
+    level so users can open an issue to extend the map.
+    """
+    if parcel.get("delivered"):
+        return ParcelStatus.DELIVERED
+
+    raw = (parcel.get("status_message") or "").strip().lower()
+    if not raw:
+        return ParcelStatus.UNKNOWN
+
+    for pattern, status in _STATUS_PATTERNS:
+        if pattern in raw:
+            return status
+
+    if raw not in _LOGGED_UNKNOWN_STATUSES:
+        _LOGGED_UNKNOWN_STATUSES.add(raw)
+        _LOGGER.info(
+            "Unmapped PostNL status %r will be reported as ParcelStatus.UNKNOWN. "
+            "Please open an issue at "
+            "https://github.com/peternijssen/ha-postnl/issues so the map can "
+            "be extended.",
+            parcel.get("status_message"),
+        )
+    return ParcelStatus.UNKNOWN
+
+
+def normalize_parcel(parcel: dict) -> dict:
+    """Wrap a transformed PostNL parcel in the canonical carrier-agnostic shape.
+
+    Top-level keys mirror DHL / DPD / parcel-aggregator. The original
+    transformed PostNL payload (GraphQL + Track & Trace fields like
+    ``status_message``, ``delivery_address_type``, ``planned_date``,
+    ``expected_datetime``) is preserved under ``raw`` for power users.
+    """
+    delivered = bool(parcel.get("delivered"))
+    return {
+        "carrier": "PostNL",
+        "barcode": parcel.get("barcode"),
+        "sender": parcel.get("source_display_name"),
+        "status": map_parcel_status(parcel),
+        "raw_status": parcel.get("status_message"),
+        "delivered": delivered,
+        "delivered_at": parcel.get("delivery_date") if delivered else None,
+        "planned_from": None if delivered else parcel.get("planned_from"),
+        "planned_to": None if delivered else parcel.get("planned_to"),
+        "pickup": parcel.get("delivery_address_type") == "ServicePoint",
+        "pickup_point": None,
+        "url": parcel.get("url"),
+        "raw": parcel,
+    }
+
+
 def _delivery_dt(parcel: dict) -> datetime | None:
-    """Parse the delivery datetime from a transformed parcel dict."""
-    date_str = parcel.get("delivery_date")
+    """Parse the delivery datetime from a normalised parcel dict."""
+    date_str = parcel.get("delivered_at")
     if not date_str:
         return None
     try:
@@ -38,6 +127,32 @@ def _delivery_dt(parcel: dict) -> datetime | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+def sort_parcels_by_ts(
+    parcels: list[dict], key_field: str, *, descending: bool = False
+) -> list[dict]:
+    """Return normalised parcels sorted by the ISO timestamp at ``key_field``.
+
+    Parcels whose value is missing or unparseable always sort to the end,
+    regardless of ``descending`` — so freshly registered parcels without
+    an ETA stay visible at the bottom instead of jumping to the top.
+    """
+    with_ts: list[tuple[datetime, dict]] = []
+    without_ts: list[dict] = []
+    for parcel in parcels:
+        value = parcel.get(key_field)
+        if not isinstance(value, str) or not value:
+            without_ts.append(parcel)
+            continue
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            without_ts.append(parcel)
+            continue
+        with_ts.append((dt, parcel))
+    with_ts.sort(key=lambda item: item[0], reverse=descending)
+    return [p for _, p in with_ts] + without_ts
 
 
 _DUTCH_MONTHS = {
@@ -108,12 +223,20 @@ class PostNLCoordinator(DataUpdateCoordinator):
         super().__init__(
             hass,
             _LOGGER,
+            config_entry=entry,
             name="PostNL",
             update_interval=timedelta(seconds=POLL_INTERVAL),
         )
-        self.config_entry = entry
         self.delivered_receiver: list[dict] = []
         self.letters: list[dict] = []
+        # barcode -> last seen ParcelStatus. ``None`` on the first refresh so
+        # we can suppress events for parcels that already existed when the
+        # integration started (we do not know their previous state).
+        self._known_state: dict[str, ParcelStatus] | None = None
+        # Letter ids seen on the previous successful letters fetch. ``None``
+        # on the first refresh for the same reason — we do not want to fire
+        # ``postnl_letter_announced`` for every letter that already existed.
+        self._known_letter_ids: set[str] | None = None
         _LOGGER.debug("PostNLCoordinator initialized with update interval: %s", self.update_interval)
         
     async def _async_update_data(self) -> dict[str, list[dict]]:
@@ -142,12 +265,31 @@ class PostNLCoordinator(DataUpdateCoordinator):
                                 shipments.get('trackedShipments', {}).get('senderShipments', [])]
             data['sender'] = await asyncio.gather(*sender_shipments)
 
+            data['receiver'] = sort_parcels_by_ts(data['receiver'], 'planned_from')
+            data['sender'] = sort_parcels_by_ts(data['sender'], 'planned_from')
+
+            active_receiver = [p for p in data['receiver'] if not p.get('delivered')]
+            self._fire_change_events(active_receiver)
+            self._known_state = {
+                p["barcode"]: p["status"]
+                for p in active_receiver
+                if p.get("barcode")
+            }
+
             delivered_receiver = [p for p in data['receiver'] if p.get('delivered')]
-            self.delivered_receiver = self._apply_delivered_filter(delivered_receiver)
+            self.delivered_receiver = sort_parcels_by_ts(
+                self._apply_delivered_filter(delivered_receiver),
+                'delivered_at',
+                descending=True,
+            )
 
             try:
                 letters_payload = await self.hass.async_add_executor_job(self.jouw_api.letters)
                 self.letters = extract_letters(letters_payload)
+                self._fire_letter_events(self.letters)
+                self._known_letter_ids = {
+                    letter["id"] for letter in self.letters if letter.get("id")
+                }
             except requests.exceptions.RequestException as exception:
                 _LOGGER.warning("PostNL letters fetch failed: %s", exception)
 
@@ -157,15 +299,65 @@ class PostNLCoordinator(DataUpdateCoordinator):
             )
 
             return data
-        except ConfigEntryAuthFailed as exception:
-            _LOGGER.error("PostNL authentication failed: %s", exception)
+        except ConfigEntryAuthFailed:
             raise
         except HomeAssistantError as exception:
-            _LOGGER.error("PostNL authentication error: %s", exception)
             raise UpdateFailed("Authentication failed") from exception
         except requests.exceptions.RequestException as exception:
-            _LOGGER.warning("PostNL endpoint unreachable: %s", exception)
             raise UpdateFailed("Unable to update PostNL data") from exception
+
+    def _fire_change_events(self, parcels: list[dict]) -> None:
+        """Fire events for newly-registered parcels and status transitions.
+
+        Silent on the very first refresh — we cannot reliably know which
+        parcels are "new" to the user vs. "already there before HA started".
+        From the second refresh onward, every parcel that was not present
+        before yields one ``postnl_parcel_registered`` event, and every
+        parcel whose normalised status changed yields one
+        ``postnl_parcel_status_changed`` event.
+        """
+        if self._known_state is None:
+            return
+
+        for parcel in parcels:
+            barcode = parcel.get("barcode")
+            if not barcode:
+                continue
+            new_status = parcel["status"]
+            if barcode not in self._known_state:
+                self.hass.bus.async_fire(
+                    f"{DOMAIN}_parcel_registered",
+                    {**parcel},
+                )
+            elif self._known_state[barcode] != new_status:
+                self.hass.bus.async_fire(
+                    f"{DOMAIN}_parcel_status_changed",
+                    {
+                        **parcel,
+                        "old_status": self._known_state[barcode],
+                        "new_status": new_status,
+                    },
+                )
+
+    def _fire_letter_events(self, letters: list[dict]) -> None:
+        """Fire ``postnl_letter_announced`` for newly-seen letter ids.
+
+        Silent on the very first refresh — we cannot tell which letters
+        are "new" vs "already announced before HA started". From the
+        second refresh onward, every letter whose id was not present in
+        the previous successful fetch yields one event with the full
+        letter payload plus ``carrier: "PostNL"``.
+        """
+        if self._known_letter_ids is None:
+            return
+        for letter in letters:
+            letter_id = letter.get("id")
+            if not letter_id or letter_id in self._known_letter_ids:
+                continue
+            self.hass.bus.async_fire(
+                f"{DOMAIN}_letter_announced",
+                {**letter, "carrier": "PostNL"},
+            )
 
     def _apply_delivered_filter(self, parcels: list[dict]) -> list[dict]:
         """Trim the delivered receiver list according to the configured options."""
@@ -186,7 +378,7 @@ class PostNLCoordinator(DataUpdateCoordinator):
             if shipment.get('delivered'):
                 _LOGGER.debug('%s already delivered, no need to call jouw.postnl.', shipment.get('key'))
 
-                return {
+                return normalize_parcel({
                     "key": shipment.get('key'),
                     "barcode": shipment.get('barcode'),
                     "name": shipment.get('title'),
@@ -206,7 +398,7 @@ class PostNLCoordinator(DataUpdateCoordinator):
                     "planned_from": None,
                     "planned_to": None,
                     "expected_datetime": None,
-                }
+                })
 
             _LOGGER.debug("Fetching Track and Trace details for shipment %s.", shipment['key'])
             track_and_trace_details = await self.hass.async_add_executor_job(self.jouw_api.track_and_trace,
@@ -245,7 +437,7 @@ class PostNLCoordinator(DataUpdateCoordinator):
                 planned_from = shipment.get('deliveryWindowFrom')
                 planned_to = shipment.get('deliveryWindowTo')
 
-            return {
+            return normalize_parcel({
                 "key": shipment.get('key'),
                 "barcode": shipment.get('barcode'),
                 "name": shipment.get('title'),
@@ -265,7 +457,7 @@ class PostNLCoordinator(DataUpdateCoordinator):
                 "planned_from": planned_from,
                 "planned_to": planned_to,
                 "expected_datetime": expected_datetime,
-            }
+            })
         except requests.exceptions.RequestException as exception:
             _LOGGER.error("Error fetching Track and Trace details for shipment %s: %s", shipment.get('key'), exception, exc_info=True)
             raise UpdateFailed("Unable to update PostNL data") from exception
