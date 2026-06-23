@@ -69,6 +69,20 @@ def test_letter_image_title_falls_back_to_id_when_missing():
     assert img.translation_placeholders == {"title": "L1"}
 
 
+def test_letter_image_exposes_letter_date_as_attribute():
+    letter = _letter("L1")
+    letter["date"] = "2026-06-16"
+    img, _ = _make_image(_coordinator([letter]), letter_id="L1")
+    assert img.extra_state_attributes == {"date": "2026-06-16"}
+
+
+def test_letter_image_date_attribute_is_none_when_letter_missing():
+    coordinator = _coordinator([_letter("L1")])
+    img, _ = _make_image(coordinator, letter_id="L1")
+    coordinator.letters = []
+    assert img.extra_state_attributes == {"date": None}
+
+
 def test_letter_image_unavailable_when_letter_gone():
     coordinator = _coordinator([_letter("L1")])
     img, _ = _make_image(coordinator, letter_id="L1")

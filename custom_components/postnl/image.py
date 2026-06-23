@@ -123,6 +123,12 @@ class PostNLLetterImage(CoordinatorEntity[PostNLCoordinator], ImageEntity):
     def available(self) -> bool:
         return super().available and self._letter() is not None
 
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        # ``date`` is the ISO date parsed from the MyMail title (e.g. "16 juni"),
+        # exposed so dashboard cards can sort letters chronologically.
+        return {"date": (self._letter() or {}).get("date")}
+
     @callback
     def _handle_coordinator_update(self) -> None:
         new_url = (self._letter() or {}).get("image_url")

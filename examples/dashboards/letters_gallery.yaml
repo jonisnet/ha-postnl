@@ -1,29 +1,37 @@
-# Picture-glance gallery of recently announced MyMail letters. Each
-# letter has its own `image.postnl_letter_<editId>` entity — paste this
-# into the raw YAML editor and the integration auto-creates one entity
-# per announced letter.
+# Dynamic gallery of every announced MyMail letter. Each letter has
+# its own `image.postnl_..._letter_<title>` entity, created and removed
+# by the integration as letters come and go. This snippet uses
+# `custom:auto-entities` (HACS) to discover them automatically, so the
+# grid keeps itself in sync without you having to list entities by hand.
 #
-# This grid card iterates over the letters attribute and references the
-# matching image entity by its editId-derived unique part. If your
-# entity_ids differ, adjust the slug template accordingly.
+# Requires the `custom:auto-entities` card from HACS:
+# https://github.com/thomasloven/lovelace-auto-entities
+#
+# Tweak `columns`, `aspect_ratio` and the `count` under `sort` to taste.
+# Drop into the raw YAML editor of any dashboard.
 
-type: grid
-title: Aangekondigde brieven
-square: false
-columns: 2
-cards:
-  - type: markdown
-    content: >-
-      {% set letters = state_attr('sensor.postnl_letters', 'letters') or [] %}
-      {% if letters %}
-      {{ letters | length }} aangekondigd, waarvan
-      {{ letters | selectattr('unread', 'equalto', true) | list | length }}
-      nog ongelezen.
-      {% else %}
-      Geen brieven aangekondigd.
-      {% endif %}
-  - type: picture-glance
-    title: Laatste brief
-    image: /local/postnl_placeholder.png  # replace with any fallback you like
-    entities: []
-    camera_image: image.postnl_letter
+type: custom:auto-entities
+card_param: cards
+show_empty: false
+card:
+  type: grid
+  title: Aangekondigde brieven
+  columns: 3
+  square: false
+filter:
+  include:
+    - integration: postnl
+      domain: image
+      options:
+        type: picture-entity
+        show_name: false
+        show_state: false
+        fit_mode: contain
+        aspect_ratio: "4:3"
+        tap_action:
+          action: more-info
+sort:
+  method: attribute
+  attribute: date
+  reverse: true
+  count: 9

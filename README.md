@@ -185,7 +185,7 @@ both automations and dashboards. Highlights:
 - [`examples/dashboards/active_parcels_grid.yaml`](examples/dashboards/active_parcels_grid.yaml) — markdown card listing every active parcel with sender, canonical status and tracking link.
 - [`examples/dashboards/summary_glance.yaml`](examples/dashboards/summary_glance.yaml) — compact 4-column glance row with the day-to-day counters (parcels, PostNL Point, recent, letters).
 - [`examples/dashboards/next_delivery_countdown.yaml`](examples/dashboards/next_delivery_countdown.yaml) — entities card showing the next expected delivery and details.
-- [`examples/dashboards/letters_gallery.yaml`](examples/dashboards/letters_gallery.yaml) — picture gallery of recently announced MyMail letters.
+- [`examples/dashboards/letters_gallery.yaml`](examples/dashboards/letters_gallery.yaml) — dynamic picture gallery of recently announced MyMail letters (requires the `custom:auto-entities` HACS card).
 
 ### Community Lovelace cards
 
