@@ -83,7 +83,7 @@ friendly-name pattern; their entity_ids carry the same account suffix:
 | `PostNL (account) Delivered parcels` | Recently delivered parcels (configurable window) |
 | `PostNL (account) Outgoing parcels` | Number of active outgoing parcels |
 | `PostNL (account) Letters` | Letters announced by PostNL's MyMail service over the last ~2 weeks; `unread` count and `letters` list on attributes |
-| `PostNL (account) Letter <title>` (image entity) | Scanned photo of a single announced letter, fetched with your token and served through Home Assistant |
+| `PostNL (account) Letter <title>` (image entity) | Scanned photo of a single announced letter, fetched with your token and served through Home Assistant. Attributes mirror the sensor's letter dict: `id`, `title`, `date`, `unread` |
 
 Every parcel exposed on a sensor attribute uses a carrier-agnostic shape:
 

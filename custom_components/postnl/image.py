@@ -125,9 +125,17 @@ class PostNLLetterImage(CoordinatorEntity[PostNLCoordinator], ImageEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        # ``date`` is the ISO date parsed from the MyMail title (e.g. "16 juni"),
-        # exposed so dashboard cards can sort letters chronologically.
-        return {"date": (self._letter() or {}).get("date")}
+        # Mirror the per-letter fields the sensor's ``letters`` attribute and
+        # the ``postnl_letter_announced`` event already carry, so templates can
+        # use whichever surface fits. ``image_url`` is intentionally omitted —
+        # the image bytes are the entity's state.
+        letter = self._letter() or {}
+        return {
+            "id": letter.get("id"),
+            "title": letter.get("title"),
+            "date": letter.get("date"),
+            "unread": letter.get("unread"),
+        }
 
     @callback
     def _handle_coordinator_update(self) -> None:
