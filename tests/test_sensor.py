@@ -6,7 +6,7 @@ directly so we can hit edge cases without going through the full
 transform_shipment / API flow.
 """
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from custom_components.postnl.const import ParcelStatus
 from custom_components.postnl.sensor import (
@@ -94,6 +94,38 @@ def test_parcel_sensor_returns_none_when_barcode_missing():
     sensor = PostNLParcelSensor(_coordinator(receiver=[]), _USERINFO, "Y")
     assert sensor.native_value is None
     assert sensor.extra_state_attributes == {}
+
+
+def test_summary_sensor_removes_stale_per_parcel_entity_from_registry():
+    """When a barcode falls out of coordinator data, the summary sensor must
+    remove the per-parcel entity from the registry. The previous self-remove
+    pattern raced with the coordinator-listener cleanup and could leave a
+    ghost entity behind.
+    """
+    coordinator = _coordinator(receiver=[_parcel(barcode="A1")])
+    sensor = PostNLIncomingParcelsSensor(
+        coordinator,
+        _USERINFO,
+        async_add_entities=MagicMock(),
+        known_barcodes={"A1", "A2"},
+    )
+    sensor.hass = MagicMock()
+
+    registry = MagicMock()
+    registry.async_get_entity_id.return_value = "sensor.postnl_parcel_a2"
+
+    with patch(
+        "custom_components.postnl.sensor.er.async_get",
+        return_value=registry,
+    ), patch.object(
+        PostNLIncomingParcelsSensor.__bases__[0], "_handle_coordinator_update"
+    ):
+        sensor._handle_coordinator_update()
+
+    registry.async_get_entity_id.assert_called_once_with(
+        "sensor", "postnl", "abc-123_A2"
+    )
+    registry.async_remove.assert_called_once_with("sensor.postnl_parcel_a2")
 
 
 # ---------------------------------------------------------------------------

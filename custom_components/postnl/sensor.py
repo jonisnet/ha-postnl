@@ -100,8 +100,12 @@ class PostNLIncomingParcelsSensor(CoordinatorEntity[PostNLCoordinator], SensorEn
     """Summary sensor for active incoming PostNL parcels.
 
     Spawns a per-parcel :class:`PostNLParcelSensor` whenever a new barcode
-    appears. Stale per-parcel sensors remove themselves once their barcode
-    drops out of the coordinator data — see ``PostNLParcelSensor``.
+    appears, and removes the per-parcel sensor from the entity registry
+    when its barcode drops out of the coordinator data. Doing the removal
+    here (synchronously, via the registry) instead of having the per-parcel
+    sensor self-remove from inside its own ``_handle_coordinator_update``
+    avoids the race where ``async_remove(force_remove=True)`` competes with
+    the coordinator-listener cleanup and leaves a ghost entity behind.
     """
 
     _attr_has_entity_name = True
@@ -147,6 +151,17 @@ class PostNLIncomingParcelsSensor(CoordinatorEntity[PostNLCoordinator], SensorEn
                 for b in new_barcodes
             )
 
+        removed_barcodes = self._known_barcodes - current_barcodes
+        if removed_barcodes:
+            registry = er.async_get(self.hass)
+            account_id: str = self._userinfo.get("account_id", "")
+            for barcode in removed_barcodes:
+                entity_id = registry.async_get_entity_id(
+                    "sensor", DOMAIN, f"{account_id}_{barcode}"
+                )
+                if entity_id:
+                    registry.async_remove(entity_id)
+
         self._known_barcodes = current_barcodes
         super()._handle_coordinator_update()
 
@@ -188,12 +203,6 @@ class PostNLParcelSensor(CoordinatorEntity[PostNLCoordinator], SensorEntity):
         parcel = self._get_parcel()
         return dict(parcel) if parcel else {}
 
-    def _handle_coordinator_update(self) -> None:
-        """Self-remove once this parcel falls out of the coordinator data."""
-        if self._get_parcel() is None and self.hass is not None:
-            self.hass.async_create_task(self.async_remove(force_remove=True))
-            return
-        super()._handle_coordinator_update()
 
 
 class PostNLNextDeliverySensor(CoordinatorEntity[PostNLCoordinator], SensorEntity):
