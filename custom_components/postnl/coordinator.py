@@ -15,10 +15,11 @@ from .auth import AsyncConfigEntryAuth
 from .const import (
     CONF_DELIVERED_FILTER_AMOUNT,
     CONF_DELIVERED_FILTER_TYPE,
+    CONF_REFRESH_INTERVAL,
     DEFAULT_DELIVERED_FILTER_AMOUNT,
     DEFAULT_DELIVERED_FILTER_TYPE,
+    DEFAULT_REFRESH_INTERVAL,
     DOMAIN,
-    POLL_INTERVAL,
     ParcelStatus,
 )
 from .graphql import PostNLGraphql
@@ -56,6 +57,14 @@ _STATUS_PATTERNS: tuple[tuple[str, ParcelStatus], ...] = (
 _LOGGED_UNKNOWN_STATUSES: set[str] = set()
 
 
+def _refresh_interval(entry: ConfigEntry) -> timedelta:
+    """Return the configured refresh interval from the config entry options."""
+    minutes = int(
+        entry.options.get(CONF_REFRESH_INTERVAL, DEFAULT_REFRESH_INTERVAL)
+    )
+    return timedelta(minutes=minutes)
+
+
 def map_parcel_status(parcel: dict) -> ParcelStatus:
     """Map a PostNL parcel dict to a canonical :class:`ParcelStatus`.
 
@@ -89,19 +98,57 @@ def map_parcel_status(parcel: dict) -> ParcelStatus:
     return ParcelStatus.UNKNOWN
 
 
+def _convert_native_dimensions(
+    native: dict | None,
+) -> tuple[float | None, dict | None]:
+    """Convert PostNL's native dimensions (g + mm) to the suite-wide canonical
+    shape (kg + cm with a pre-formatted ``text`` string).
+
+    PostNL ships ``{height, width, depth, weight}`` in grams + millimetres,
+    and calls the long edge ``depth`` rather than ``length``. The canonical
+    contract every other carrier in the suite honours is kg + cm + ``length``,
+    with a pre-formatted ``"L x W x H cm"`` string under ``text`` so dashboard
+    cards can render it directly.
+    """
+    if not native:
+        return None, None
+    weight_g = native.get("weight")
+    weight_kg = weight_g / 1000 if weight_g is not None else None
+    depth_mm = native.get("depth")
+    width_mm = native.get("width")
+    height_mm = native.get("height")
+    if depth_mm is None or width_mm is None or height_mm is None:
+        return weight_kg, None
+    length_cm = depth_mm / 10
+    width_cm = width_mm / 10
+    height_cm = height_mm / 10
+    text = f"{int(round(length_cm))} x {int(round(width_cm))} x {int(round(height_cm))} cm"
+    return weight_kg, {
+        "length": length_cm,
+        "width": width_cm,
+        "height": height_cm,
+        "text": text,
+    }
+
+
 def normalize_parcel(parcel: dict) -> dict:
     """Wrap a transformed PostNL parcel in the canonical carrier-agnostic shape.
 
     Top-level keys mirror DHL / DPD / parcel-aggregator. The original
     transformed PostNL payload (GraphQL + Track & Trace fields like
     ``status_message``, ``delivery_address_type``, ``planned_date``,
-    ``expected_datetime``) is preserved under ``raw`` for power users.
+    ``expected_datetime`` and the native ``dimensions`` dict in g + mm)
+    is preserved under ``raw`` for power users.
     """
     delivered = bool(parcel.get("delivered"))
+    weight_kg, canonical_dimensions = _convert_native_dimensions(
+        parcel.get("dimensions")
+    )
     return {
         "carrier": "PostNL",
         "barcode": parcel.get("barcode"),
         "sender": parcel.get("source_display_name"),
+        "receiver": parcel.get("receiver"),
         "status": map_parcel_status(parcel),
         "raw_status": parcel.get("status_message"),
         "delivered": delivered,
@@ -111,6 +158,8 @@ def normalize_parcel(parcel: dict) -> dict:
         "pickup": parcel.get("delivery_address_type") == "ServicePoint",
         "pickup_point": None,
         "url": parcel.get("url"),
+        "weight": weight_kg,
+        "dimensions": canonical_dimensions,
         "raw": parcel,
     }
 
@@ -229,7 +278,7 @@ class PostNLCoordinator(DataUpdateCoordinator):
             _LOGGER,
             config_entry=entry,
             name="PostNL",
-            update_interval=timedelta(seconds=POLL_INTERVAL),
+            update_interval=_refresh_interval(entry),
         )
         self.delivered_receiver: list[dict] = []
         self.letters: list[dict] = []
@@ -237,6 +286,11 @@ class PostNLCoordinator(DataUpdateCoordinator):
         # we can suppress events for parcels that already existed when the
         # integration started (we do not know their previous state).
         self._known_state: dict[str, ParcelStatus] | None = None
+        # barcode -> last seen (planned_from, planned_to) tuple. Mirrors
+        # ``_known_state`` for delivery-time-change detection.
+        self._known_delivery_times: (
+            dict[str, tuple[str | None, str | None]] | None
+        ) = None
         # Letter ids seen on the previous successful letters fetch. ``None``
         # on the first refresh for the same reason — we do not want to fire
         # ``postnl_letter_announced`` for every letter that already existed.
@@ -279,6 +333,11 @@ class PostNLCoordinator(DataUpdateCoordinator):
                 for p in active_receiver
                 if p.get("barcode")
             }
+            self._known_delivery_times = {
+                p["barcode"]: (p.get("planned_from"), p.get("planned_to"))
+                for p in active_receiver
+                if p.get("barcode")
+            }
 
             delivered_receiver = [p for p in data['receiver'] if p.get('delivered')]
             self.delivered_receiver = sort_parcels_by_ts(
@@ -311,17 +370,21 @@ class PostNLCoordinator(DataUpdateCoordinator):
             raise UpdateFailed("Unable to update PostNL data") from exception
 
     def _fire_change_events(self, parcels: list[dict]) -> None:
-        """Fire events for newly-registered parcels and status transitions.
+        """Fire events for newly-registered parcels and parcel transitions.
 
         Silent on the very first refresh — we cannot reliably know which
         parcels are "new" to the user vs. "already there before HA started".
         From the second refresh onward, every parcel that was not present
-        before yields one ``postnl_parcel_registered`` event, and every
-        parcel whose normalised status changed yields one
-        ``postnl_parcel_status_changed`` event.
+        before yields one ``postnl_parcel_registered`` event, every parcel
+        whose normalised status changed yields one
+        ``postnl_parcel_status_changed`` event, and every parcel whose
+        ``planned_from`` or ``planned_to`` changed to a non-null value
+        yields one ``postnl_parcel_delivery_time_changed`` event.
         """
         if self._known_state is None:
             return
+
+        known_times = self._known_delivery_times or {}
 
         for parcel in parcels:
             barcode = parcel.get("barcode")
@@ -333,13 +396,37 @@ class PostNLCoordinator(DataUpdateCoordinator):
                     f"{DOMAIN}_parcel_registered",
                     {**parcel},
                 )
-            elif self._known_state[barcode] != new_status:
+                continue
+
+            if self._known_state[barcode] != new_status:
                 self.hass.bus.async_fire(
                     f"{DOMAIN}_parcel_status_changed",
                     {
                         **parcel,
                         "old_status": self._known_state[barcode],
                         "new_status": new_status,
+                    },
+                )
+
+            old_from, old_to = known_times.get(barcode, (None, None))
+            new_from = parcel.get("planned_from")
+            new_to = parcel.get("planned_to")
+            # Fire only when at least one of the two ends up with a real
+            # (non-null) value AND that value differs from the last-known
+            # one. value -> null transitions are intentionally silent —
+            # they mean the carrier dropped the ETA, which is not what
+            # users want to be paged about.
+            from_changed = new_from is not None and new_from != old_from
+            to_changed = new_to is not None and new_to != old_to
+            if from_changed or to_changed:
+                self.hass.bus.async_fire(
+                    f"{DOMAIN}_parcel_delivery_time_changed",
+                    {
+                        **parcel,
+                        "old_planned_from": old_from,
+                        "new_planned_from": new_from,
+                        "old_planned_to": old_to,
+                        "new_planned_to": new_to,
                     },
                 )
 
@@ -378,17 +465,25 @@ class PostNLCoordinator(DataUpdateCoordinator):
     async def transform_shipment(self, shipment) -> dict:
         _LOGGER.debug('Updating %s', shipment.get('key'))
 
+        receiver_title = (shipment.get('receiverTitle') or '').strip() or None
+
         try:
             if shipment.get('delivered'):
                 _LOGGER.debug('%s already delivered, no need to call jouw.postnl.', shipment.get('key'))
 
+                # Delivered short-circuits the Track & Trace call, so there's no
+                # ``colli.recipient.names.personName`` to read — the GraphQL
+                # ``receiverTitle`` is the equivalent. No weight/dimensions
+                # available on this path; the suite contract accepts those as
+                # ``None``.
                 return normalize_parcel({
                     "key": shipment.get('key'),
                     "barcode": shipment.get('barcode'),
                     "name": shipment.get('title'),
                     "url": shipment.get('detailsUrl'),
                     "shipment_type": shipment.get('shipmentType'),
-                    "receiver_title": (shipment.get('receiverTitle') or '').strip() or None,
+                    "receiver_title": receiver_title,
+                    "receiver": receiver_title,
                     "source_display_name": (
                         (shipment.get('sourceDisplayName') or '').strip()
                         or (shipment.get('title') or '').strip()
@@ -402,6 +497,7 @@ class PostNLCoordinator(DataUpdateCoordinator):
                     "planned_from": None,
                     "planned_to": None,
                     "expected_datetime": None,
+                    "dimensions": None,
                 })
 
             _LOGGER.debug("Fetching Track and Trace details for shipment %s.", shipment['key'])
@@ -416,6 +512,8 @@ class PostNLCoordinator(DataUpdateCoordinator):
 
             status_message = "Unknown"
             planned_date = planned_from = planned_to = expected_datetime = None
+            recipient_name: str | None = None
+            native_dimensions: dict | None = None
 
             if colli:
                 _LOGGER.debug("Colli details found for shipment %s: %s", shipment['key'], colli)
@@ -435,6 +533,10 @@ class PostNLCoordinator(DataUpdateCoordinator):
                     planned_to = shipment.get('deliveryWindowTo')
 
                 status_message = colli.get('statusPhase', {}).get('message', "Unknown")
+                recipient_name = (
+                    colli.get('recipient', {}).get('names', {}).get('personName')
+                )
+                native_dimensions = (colli.get('details') or {}).get('dimensions')
             else:
                 _LOGGER.warning("Barcode not found in colli details for shipment %s.", shipment['key'])
                 planned_date = shipment.get('deliveryWindowFrom')
@@ -447,7 +549,12 @@ class PostNLCoordinator(DataUpdateCoordinator):
                 "name": shipment.get('title'),
                 "url": shipment.get('detailsUrl'),
                 "shipment_type": shipment.get('shipmentType'),
-                "receiver_title": (shipment.get('receiverTitle') or '').strip() or None,
+                "receiver_title": receiver_title,
+                # ``recipient.personName`` from Track & Trace is the
+                # authoritative recipient name on the active path;
+                # ``receiverTitle`` is the GraphQL fallback for when T&T
+                # doesn't have it yet (first poll after registration).
+                "receiver": recipient_name or receiver_title,
                 "source_display_name": (
                         (shipment.get('sourceDisplayName') or '').strip()
                         or (shipment.get('title') or '').strip()
@@ -461,6 +568,11 @@ class PostNLCoordinator(DataUpdateCoordinator):
                 "planned_from": planned_from,
                 "planned_to": planned_to,
                 "expected_datetime": expected_datetime,
+                # Native PostNL dimensions (g + mm). Lives on the
+                # intermediate dict so it surfaces under ``raw`` for power
+                # users; ``normalize_parcel`` reads it and produces the
+                # canonical kg + cm + ``text`` shape at the top level.
+                "dimensions": native_dimensions,
             })
         except requests.exceptions.RequestException as exception:
             _LOGGER.error("Error fetching Track and Trace details for shipment %s: %s", shipment.get('key'), exception, exc_info=True)

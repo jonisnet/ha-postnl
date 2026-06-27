@@ -8,7 +8,9 @@ from custom_components.postnl.const import ParcelStatus
 from custom_components.postnl.coordinator import (
     _DUTCH_MONTHS,
     PostNLCoordinator,
+    _convert_native_dimensions,
     _delivery_dt,
+    _refresh_interval,
     extract_letters,
     map_parcel_status,
     normalize_parcel,
@@ -150,6 +152,99 @@ def test_normalize_parcel_delivered_window_cleared():
     assert parcel["delivered_at"] == "2026-06-20T10:00:00Z"
     assert parcel["planned_from"] is None
     assert parcel["planned_to"] is None
+
+
+def test_normalize_parcel_passes_receiver_through():
+    parcel = normalize_parcel({
+        "barcode": "3SXYZ",
+        "delivered": False,
+        "status_message": "Pakket is onderweg",
+        "receiver": "Peter",
+    })
+    assert parcel["receiver"] == "Peter"
+
+
+def test_normalize_parcel_weight_and_dimensions_from_native():
+    """Canonical weight (kg) + dimensions (cm + text) derive from native g + mm."""
+    parcel = normalize_parcel({
+        "barcode": "3SXYZ",
+        "delivered": False,
+        "status_message": "Pakket is onderweg",
+        "dimensions": {"weight": 1500, "depth": 300, "width": 200, "height": 150},
+    })
+    assert parcel["weight"] == 1.5
+    assert parcel["dimensions"] == {
+        "length": 30.0,
+        "width": 20.0,
+        "height": 15.0,
+        "text": "30 x 20 x 15 cm",
+    }
+    # Native dimensions stay on ``raw`` for power users.
+    assert parcel["raw"]["dimensions"] == {
+        "weight": 1500, "depth": 300, "width": 200, "height": 150,
+    }
+
+
+def test_normalize_parcel_weight_and_dimensions_none_when_native_missing():
+    parcel = normalize_parcel({
+        "barcode": "3SXYZ",
+        "delivered": True,
+        "status_message": "Pakket is bezorgd",
+    })
+    assert parcel["weight"] is None
+    assert parcel["dimensions"] is None
+
+
+# ---------------------------------------------------------------------------
+# _convert_native_dimensions
+# ---------------------------------------------------------------------------
+
+
+def test_convert_native_dimensions_converts_g_to_kg_and_mm_to_cm():
+    native = {"weight": 1500, "depth": 300, "width": 200, "height": 150}
+    weight, canonical = _convert_native_dimensions(native)
+    assert weight == 1.5
+    assert canonical == {
+        "length": 30.0,
+        "width": 20.0,
+        "height": 15.0,
+        "text": "30 x 20 x 15 cm",
+    }
+
+
+def test_convert_native_dimensions_handles_weight_only():
+    weight, canonical = _convert_native_dimensions({"weight": 800})
+    assert weight == 0.8
+    assert canonical is None
+
+
+def test_convert_native_dimensions_returns_none_for_empty_input():
+    assert _convert_native_dimensions(None) == (None, None)
+    assert _convert_native_dimensions({}) == (None, None)
+
+
+def test_convert_native_dimensions_rounds_text_to_integers():
+    """The text variant always renders integer cm, even for fractional values."""
+    native = {"weight": 100, "depth": 254, "width": 124, "height": 76}
+    _, canonical = _convert_native_dimensions(native)
+    assert canonical["text"] == "25 x 12 x 8 cm"
+
+
+# ---------------------------------------------------------------------------
+# _refresh_interval
+# ---------------------------------------------------------------------------
+
+
+def test_refresh_interval_defaults_to_30_minutes_when_option_unset():
+    entry = MagicMock()
+    entry.options = {}
+    assert _refresh_interval(entry).total_seconds() == 30 * 60
+
+
+def test_refresh_interval_reads_from_options():
+    entry = MagicMock()
+    entry.options = {"refresh_interval": 60}
+    assert _refresh_interval(entry).total_seconds() == 60 * 60
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +463,94 @@ async def test_transform_shipment_falls_back_to_delivery_window_strings(hass):
     assert parcel["planned_to"] == "2026-06-18T17:00:00Z"
 
 
+async def test_transform_shipment_receiver_from_recipient_person_name(hass):
+    """Active path picks up recipient name from colli.recipient.names.personName."""
+    coordinator = _make_coordinator(hass)
+    coordinator.jouw_api.track_and_trace = MagicMock(return_value={
+        "colli": {
+            "3SXYZ": {
+                "statusPhase": {"message": "ONDERWEG"},
+                "recipient": {"names": {"personName": "Peter Nijssen"}},
+            }
+        }
+    })
+    shipment = {
+        "key": "K",
+        "barcode": "3SXYZ",
+        "title": "Brand",
+        "receiverTitle": "Fallback",
+        "delivered": False,
+    }
+    parcel = await coordinator.transform_shipment(shipment)
+    assert parcel["receiver"] == "Peter Nijssen"
+
+
+async def test_transform_shipment_receiver_falls_back_to_receiver_title(hass):
+    """When colli.recipient.personName is missing, fall back to GraphQL receiverTitle."""
+    coordinator = _make_coordinator(hass)
+    coordinator.jouw_api.track_and_trace = MagicMock(return_value={
+        "colli": {
+            "3SXYZ": {
+                "statusPhase": {"message": "ONDERWEG"},
+            }
+        }
+    })
+    shipment = {
+        "key": "K",
+        "barcode": "3SXYZ",
+        "title": "Brand",
+        "receiverTitle": "Fallback Name",
+        "delivered": False,
+    }
+    parcel = await coordinator.transform_shipment(shipment)
+    assert parcel["receiver"] == "Fallback Name"
+
+
+async def test_transform_shipment_delivered_receiver_uses_receiver_title(hass):
+    coordinator = _make_coordinator(hass)
+    shipment = {
+        "key": "K",
+        "barcode": "3SDEL",
+        "title": "Brand",
+        "receiverTitle": "Peter ",
+        "delivered": True,
+        "deliveredTimeStamp": "2026-06-15T14:00:00Z",
+    }
+    parcel = await coordinator.transform_shipment(shipment)
+    assert parcel["receiver"] == "Peter"
+    # Delivered path skips Track & Trace, so no weight / dimensions available.
+    assert parcel["weight"] is None
+    assert parcel["dimensions"] is None
+
+
+async def test_transform_shipment_extracts_native_dimensions_from_colli(hass):
+    """colli.details.dimensions surfaces as native g+mm on raw and converted on the top level."""
+    coordinator = _make_coordinator(hass)
+    coordinator.jouw_api.track_and_trace = MagicMock(return_value={
+        "colli": {
+            "3SXYZ": {
+                "statusPhase": {"message": "ONDERWEG"},
+                "details": {
+                    "dimensions": {
+                        "weight": 1500, "depth": 300, "width": 200, "height": 150,
+                    },
+                },
+            }
+        }
+    })
+    shipment = {
+        "key": "K",
+        "barcode": "3SXYZ",
+        "title": "Brand",
+        "delivered": False,
+    }
+    parcel = await coordinator.transform_shipment(shipment)
+    assert parcel["weight"] == 1.5
+    assert parcel["dimensions"]["text"] == "30 x 20 x 15 cm"
+    assert parcel["raw"]["dimensions"]["weight"] == 1500
+    assert parcel["raw"]["dimensions"]["depth"] == 300
+
+
 # ---------------------------------------------------------------------------
 # _fire_change_events
 # ---------------------------------------------------------------------------
@@ -469,6 +652,92 @@ async def test_fire_change_events_skips_parcels_without_barcode(hass):
     captured = _capture(hass, "postnl_parcel_registered")
 
     coordinator._fire_change_events([_norm("", "Pakket is onderweg")])
+    await hass.async_block_till_done()
+
+    assert captured == []
+
+
+# ---------------------------------------------------------------------------
+# Event firing — parcel_delivery_time_changed
+# ---------------------------------------------------------------------------
+
+
+def _norm_with_window(
+    barcode: str, planned_from: str | None, planned_to: str | None
+) -> dict:
+    return normalize_parcel({
+        "barcode": barcode,
+        "delivered": False,
+        "status_message": "Pakket is onderweg",
+        "planned_from": planned_from,
+        "planned_to": planned_to,
+    })
+
+
+async def test_fire_change_events_delivery_time_changed_when_window_appears(hass):
+    """A barcode whose planned_from gains a value fires delivery_time_changed."""
+    coordinator = _make_coordinator(hass)
+    coordinator._known_state = {"A": ParcelStatus.IN_TRANSIT}
+    coordinator._known_delivery_times = {"A": (None, None)}
+    captured = _capture(hass, "postnl_parcel_delivery_time_changed")
+
+    coordinator._fire_change_events([
+        _norm_with_window("A", "2026-06-17T14:00:00Z", "2026-06-17T16:00:00Z"),
+    ])
+    await hass.async_block_till_done()
+
+    assert len(captured) == 1
+    payload = captured[0].data
+    assert payload["barcode"] == "A"
+    assert payload["old_planned_from"] is None
+    assert payload["new_planned_from"] == "2026-06-17T14:00:00Z"
+
+
+async def test_fire_change_events_delivery_time_changed_when_window_shifts(hass):
+    """A barcode whose planned_from changes to a different value fires the event."""
+    coordinator = _make_coordinator(hass)
+    coordinator._known_state = {"A": ParcelStatus.IN_TRANSIT}
+    coordinator._known_delivery_times = {
+        "A": ("2026-06-17T10:00:00Z", "2026-06-17T12:00:00Z"),
+    }
+    captured = _capture(hass, "postnl_parcel_delivery_time_changed")
+
+    coordinator._fire_change_events([
+        _norm_with_window("A", "2026-06-17T14:00:00Z", "2026-06-17T16:00:00Z"),
+    ])
+    await hass.async_block_till_done()
+
+    assert len(captured) == 1
+    assert captured[0].data["old_planned_from"] == "2026-06-17T10:00:00Z"
+    assert captured[0].data["new_planned_from"] == "2026-06-17T14:00:00Z"
+
+
+async def test_fire_change_events_no_delivery_time_event_when_window_clears(hass):
+    """value -> null transitions are intentionally silent."""
+    coordinator = _make_coordinator(hass)
+    coordinator._known_state = {"A": ParcelStatus.IN_TRANSIT}
+    coordinator._known_delivery_times = {
+        "A": ("2026-06-17T10:00:00Z", "2026-06-17T12:00:00Z"),
+    }
+    captured = _capture(hass, "postnl_parcel_delivery_time_changed")
+
+    coordinator._fire_change_events([_norm_with_window("A", None, None)])
+    await hass.async_block_till_done()
+
+    assert captured == []
+
+
+async def test_fire_change_events_no_delivery_time_event_when_unchanged(hass):
+    coordinator = _make_coordinator(hass)
+    coordinator._known_state = {"A": ParcelStatus.IN_TRANSIT}
+    coordinator._known_delivery_times = {
+        "A": ("2026-06-17T14:00:00Z", "2026-06-17T16:00:00Z"),
+    }
+    captured = _capture(hass, "postnl_parcel_delivery_time_changed")
+
+    coordinator._fire_change_events([
+        _norm_with_window("A", "2026-06-17T14:00:00Z", "2026-06-17T16:00:00Z"),
+    ])
     await hass.async_block_till_done()
 
     assert captured == []

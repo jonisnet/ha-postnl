@@ -11,6 +11,8 @@ from custom_components.postnl.auth import PostNLAuthError
 from custom_components.postnl.const import (
     CONF_DELIVERED_FILTER_AMOUNT,
     CONF_DELIVERED_FILTER_TYPE,
+    CONF_REFRESH_INTERVAL,
+    DEFAULT_REFRESH_INTERVAL,
     DOMAIN,
 )
 
@@ -170,7 +172,8 @@ async def test_reauth_flow_surfaces_invalid_auth(hass):
     assert entry.data[CONF_PASSWORD] == _USER_INPUT[CONF_PASSWORD]
 
 
-async def test_options_flow_updates_filter(hass):
+async def test_options_flow_updates_filter_and_polling(hass):
+    """Submitting the sectioned options form persists both buckets."""
     from pytest_homeassistant_custom_component.common import MockConfigEntry
 
     entry = MockConfigEntry(
@@ -187,8 +190,17 @@ async def test_options_flow_updates_filter(hass):
 
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
-        user_input={CONF_DELIVERED_FILTER_TYPE: "parcels", CONF_DELIVERED_FILTER_AMOUNT: 21},
+        user_input={
+            "delivered": {
+                CONF_DELIVERED_FILTER_TYPE: "parcels",
+                CONF_DELIVERED_FILTER_AMOUNT: 21,
+            },
+            "polling": {
+                CONF_REFRESH_INTERVAL: str(DEFAULT_REFRESH_INTERVAL),
+            },
+        },
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_DELIVERED_FILTER_TYPE] == "parcels"
     assert result["data"][CONF_DELIVERED_FILTER_AMOUNT] == 21
+    assert result["data"][CONF_REFRESH_INTERVAL] == DEFAULT_REFRESH_INTERVAL
