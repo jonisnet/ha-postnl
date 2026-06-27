@@ -56,13 +56,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: PostNLConfigEntry) -> bo
     entry.runtime_data = PostNLData(auth=auth, coordinator=coordinator, userinfo=userinfo)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    entry.async_on_unload(entry.add_update_listener(_async_update_options))
     return True
-
-
-async def _async_update_options(hass: HomeAssistant, entry: PostNLConfigEntry) -> None:
-    """Refresh the coordinator immediately when options are changed."""
-    await entry.runtime_data.coordinator.async_request_refresh()
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: PostNLConfigEntry) -> bool:
