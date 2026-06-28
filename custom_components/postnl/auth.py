@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import logging
@@ -11,7 +12,7 @@ from urllib.parse import parse_qs, urlparse
 import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,6 +32,15 @@ _USER_AGENT = (
 
 class PostNLAuthError(Exception):
     pass
+
+
+class PostNLInvalidAuth(PostNLAuthError):
+    """Raised when PostNL rejects the username/password outright.
+
+    Distinct from a generic ``PostNLAuthError`` so callers can tell a
+    definitive "your credentials are wrong" (reauth) apart from a
+    transient login hiccup (retry).
+    """
 
 
 class PostNLAuth:
@@ -114,7 +124,7 @@ class PostNLAuth:
 
         capture_token = self._json_value(result_body, "accessToken")
         if not capture_token:
-            raise PostNLAuthError(
+            raise PostNLInvalidAuth(
                 "Capture did not return an access token — check your credentials"
             )
 
@@ -270,6 +280,7 @@ class AsyncConfigEntryAuth:
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self._hass = hass
         self._entry = entry
+        self._lock = asyncio.Lock()
 
     @property
     def access_token(self) -> str:
@@ -284,30 +295,53 @@ class AsyncConfigEntryAuth:
         if time.time() < token.get("expires_at", 0) - 30:
             return token["access_token"]
 
-        _LOGGER.debug("Access token expired, refreshing")
-        refresh_token = token.get("refresh_token")
-        if refresh_token:
-            try:
-                new_token = await PostNLAuth.async_refresh_token(refresh_token)
-                self._hass.config_entries.async_update_entry(
-                    self._entry,
-                    data={**self._entry.data, "token": new_token},
-                )
-                return new_token["access_token"]
-            except PostNLAuthError as err:
-                _LOGGER.debug("Token refresh failed, falling back to re-login: %s", err)
+        async with self._lock:
+            # Another caller may have refreshed while we waited for the lock.
+            # Re-read and bail out early if the token is valid again — this also
+            # stops two callers from spending the same rotating refresh token
+            # twice, which PostNL rejects and which would force a re-login.
+            token = self._entry.data.get("token") or {}
+            if "access_token" in token and time.time() < token.get("expires_at", 0) - 30:
+                return token["access_token"]
 
-        username = self._entry.data.get("username")
-        password = self._entry.data.get("password")
-        if username and password:
-            try:
-                new_token = await PostNLAuth(username, password).async_login()
-                self._hass.config_entries.async_update_entry(
-                    self._entry,
-                    data={**self._entry.data, "token": new_token},
-                )
-                return new_token["access_token"]
-            except PostNLAuthError as err:
-                _LOGGER.debug("Re-login failed, triggering reauth: %s", err)
+            _LOGGER.debug("Access token expired, refreshing")
+            refresh_token = token.get("refresh_token")
+            if refresh_token:
+                try:
+                    new_token = await PostNLAuth.async_refresh_token(refresh_token)
+                    # PostNL does not always return a fresh refresh token on a
+                    # refresh. Keep the existing one so the next cycle can still
+                    # refresh instead of being forced into a full re-login.
+                    if not new_token.get("refresh_token"):
+                        new_token["refresh_token"] = refresh_token
+                    self._hass.config_entries.async_update_entry(
+                        self._entry,
+                        data={**self._entry.data, "token": new_token},
+                    )
+                    return new_token["access_token"]
+                except PostNLAuthError as err:
+                    _LOGGER.debug("Token refresh failed, falling back to re-login: %s", err)
 
-        raise ConfigEntryAuthFailed("Unable to obtain a valid token")
+            username = self._entry.data.get("username")
+            password = self._entry.data.get("password")
+            if username and password:
+                try:
+                    new_token = await PostNLAuth(username, password).async_login()
+                    self._hass.config_entries.async_update_entry(
+                        self._entry,
+                        data={**self._entry.data, "token": new_token},
+                    )
+                    return new_token["access_token"]
+                except PostNLInvalidAuth as err:
+                    # Credentials are genuinely wrong — prompt the user to reauth.
+                    _LOGGER.debug("Re-login rejected credentials, triggering reauth: %s", err)
+                    raise ConfigEntryAuthFailed("Invalid PostNL credentials") from err
+                except PostNLAuthError as err:
+                    # Transient login hiccup (recaptcha, rate limit, a changed
+                    # login widget, a network blip mid-flow). Do NOT drop the
+                    # session — raise a generic error so the coordinator turns it
+                    # into a retryable UpdateFailed and the next poll recovers.
+                    _LOGGER.warning("PostNL re-login failed, will retry: %s", err)
+                    raise HomeAssistantError("PostNL re-login failed") from err
+
+            raise ConfigEntryAuthFailed("Unable to obtain a valid token")

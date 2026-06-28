@@ -15,12 +15,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 
 from custom_components.postnl.auth import (
     AsyncConfigEntryAuth,
     PostNLAuth,
     PostNLAuthError,
+    PostNLInvalidAuth,
 )
 
 
@@ -267,17 +268,96 @@ async def test_check_and_refresh_token_skips_refresh_when_no_refresh_token_prese
 
 
 @pytest.mark.asyncio
-async def test_check_and_refresh_token_raises_when_login_also_fails():
+async def test_check_and_refresh_token_reauths_when_credentials_invalid():
+    """A definitive credential rejection during re-login → reauth."""
     entry = _entry({"access_token": "old", "expires_at": 0, "refresh_token": "rt"})
-    hass = _hass()
-    auth = AsyncConfigEntryAuth(hass, entry)
+    auth = AsyncConfigEntryAuth(_hass(), entry)
 
     with patch("custom_components.postnl.auth.PostNLAuth.async_refresh_token",
                new=AsyncMock(side_effect=PostNLAuthError("expired"))):
         with patch("custom_components.postnl.auth.PostNLAuth.async_login",
-                   new=AsyncMock(side_effect=PostNLAuthError("bad creds"))):
+                   new=AsyncMock(side_effect=PostNLInvalidAuth("check your credentials"))):
             with pytest.raises(ConfigEntryAuthFailed):
                 await auth.check_and_refresh_token()
+
+
+@pytest.mark.asyncio
+async def test_check_and_refresh_token_retries_when_login_transiently_fails():
+    """A transient re-login hiccup must NOT log the user out — it should
+    surface as a generic (retryable) error, not ConfigEntryAuthFailed."""
+    entry = _entry({"access_token": "old", "expires_at": 0, "refresh_token": "rt"})
+    auth = AsyncConfigEntryAuth(_hass(), entry)
+
+    with patch("custom_components.postnl.auth.PostNLAuth.async_refresh_token",
+               new=AsyncMock(side_effect=PostNLAuthError("expired"))):
+        with patch("custom_components.postnl.auth.PostNLAuth.async_login",
+                   new=AsyncMock(side_effect=PostNLAuthError("recaptcha challenge"))):
+            with pytest.raises(HomeAssistantError) as excinfo:
+                await auth.check_and_refresh_token()
+
+    assert not isinstance(excinfo.value, ConfigEntryAuthFailed)
+
+
+@pytest.mark.asyncio
+async def test_check_and_refresh_token_preserves_refresh_token_when_response_omits_it():
+    """PostNL sometimes refreshes without returning a new refresh token; the
+    existing one must be kept so the next cycle can still refresh."""
+    new_token = {"access_token": "rotated", "refresh_token": None,
+                 "expires_at": time.time() + 1800}
+    entry = _entry({"access_token": "old", "expires_at": 0, "refresh_token": "keepme"})
+    hass = _hass()
+    auth = AsyncConfigEntryAuth(hass, entry)
+
+    with patch("custom_components.postnl.auth.PostNLAuth.async_refresh_token",
+               new=AsyncMock(return_value=new_token)):
+        result = await auth.check_and_refresh_token()
+
+    assert result == "rotated"
+    updated = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert updated["token"]["refresh_token"] == "keepme"
+
+
+@pytest.mark.asyncio
+async def test_check_and_refresh_token_returns_early_when_another_caller_refreshed():
+    """If a concurrent caller refreshes while we wait for the lock, the
+    re-check inside the lock returns the fresh token without refreshing again."""
+    expired = {"access_token": "old", "expires_at": 0, "refresh_token": "rt"}
+    refreshed = {"access_token": "by-other", "expires_at": time.time() + 3600,
+                 "refresh_token": "rt"}
+    entry = MagicMock()
+    # First read (outer check) sees the expired token; the read inside the lock
+    # sees the token a concurrent caller already refreshed.
+    entry.data = MagicMock()
+    entry.data.get = MagicMock(side_effect=[expired, refreshed])
+    hass = _hass()
+    auth = AsyncConfigEntryAuth(hass, entry)
+
+    with patch("custom_components.postnl.auth.PostNLAuth.async_refresh_token",
+               new=AsyncMock()) as mock_refresh:
+        result = await auth.check_and_refresh_token()
+
+    assert result == "by-other"
+    mock_refresh.assert_not_awaited()
+    hass.config_entries.async_update_entry.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_login_raises_invalid_auth_when_capture_returns_no_token():
+    """Bad credentials → Capture yields no access token → PostNLInvalidAuth."""
+    login_url = "https://login.postnl.nl/login/authorize?client_id=x&state=s"
+    authorize_resp = _response(text="aicCsrf: 'csrf123'")
+    authorize_resp.url = login_url
+    capture_submit_resp = _response()
+    capture_poll_resp = _response(text="{}")  # no accessToken in the result
+
+    session = _aiohttp_session(authorize_resp, capture_submit_resp, capture_poll_resp)
+    session.cookie_jar = []
+
+    with patch("custom_components.postnl.auth.aiohttp.ClientSession",
+               return_value=_AsyncContext(session)):
+        with patch.object(PostNLAuth, "_pkce_pair", return_value=("v", "c")):
+            with pytest.raises(PostNLInvalidAuth):
+                await PostNLAuth("user", "pw").async_login()
 
 
 @pytest.mark.asyncio

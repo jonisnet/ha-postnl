@@ -5,6 +5,7 @@ import requests
 
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 
 from custom_components.postnl import PostNLData
 from custom_components.postnl.const import DOMAIN
@@ -80,6 +81,32 @@ async def test_setup_entry_retries_on_userinfo_error(hass):
             "custom_components.postnl.PostNLLoginAPI.userinfo",
             new=MagicMock(return_value={"error": "rate-limited"}),
         ),
+    ):
+        assert not await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+
+
+async def test_setup_entry_reauths_on_invalid_credentials(hass):
+    """A definitive auth failure during setup → reauth (SETUP_ERROR)."""
+    entry = _add_entry(hass)
+    with patch(
+        "custom_components.postnl.AsyncConfigEntryAuth.check_and_refresh_token",
+        new=AsyncMock(side_effect=ConfigEntryAuthFailed("invalid")),
+    ):
+        assert not await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.SETUP_ERROR
+
+
+async def test_setup_entry_retries_on_transient_auth_failure(hass):
+    """A transient auth/login failure during setup → retry, not reauth."""
+    entry = _add_entry(hass)
+    with patch(
+        "custom_components.postnl.AsyncConfigEntryAuth.check_and_refresh_token",
+        new=AsyncMock(side_effect=HomeAssistantError("re-login failed")),
     ):
         assert not await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()

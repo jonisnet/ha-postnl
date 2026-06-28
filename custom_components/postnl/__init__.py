@@ -39,8 +39,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: PostNLConfigEntry) -> bo
 
     try:
         await auth.check_and_refresh_token()
+    except ConfigEntryAuthFailed:
+        # Credentials are genuinely invalid — let HA prompt for reauth.
+        raise
     except HomeAssistantError as exception:
-        raise ConfigEntryAuthFailed("Unable to authenticate with PostNL") from exception
+        # Transient auth/login failure — retry setup with backoff instead of
+        # pushing the user into reauth.
+        raise ConfigEntryNotReady("Unable to authenticate with PostNL") from exception
 
     postnl_login_api = PostNLLoginAPI(auth.access_token)
 

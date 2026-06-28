@@ -135,6 +135,24 @@ re-propose these as improvements:
   NOT user-configurable": that rule targets HA Core integrations; this
   is a HACS integration where a user-tunable poll cadence is a wanted
   feature. Do not "fix" this to match the core rule.
+- **Token-refresh resilience (do not weaken).** `check_and_refresh_token`
+  mirrors the robustness of HA's `OAuth2Session` without adopting it
+  (which would re-introduce the browser-extension onboarding the fork
+  deliberately dropped):
+  - **Preserves the refresh token** when PostNL's refresh response omits
+    a new one (`new_token["refresh_token"] = old` fallback). Losing it
+    used to force a full re-login on the next cycle.
+  - **`asyncio.Lock` around refresh/re-login** with a re-check inside the
+    lock, so two callers never spend the same rotating refresh token
+    twice (PostNL rejects that).
+  - **Transient re-login failures stay retryable.** Only a definitive
+    credential rejection (`PostNLInvalidAuth`, raised when Capture returns
+    no token) escalates to `ConfigEntryAuthFailed` / reauth. Any other
+    `PostNLAuthError` (recaptcha, rate-limit, changed widget, mid-flow
+    network blip) raises a generic `HomeAssistantError` → the coordinator
+    turns it into a retryable `UpdateFailed`, and setup turns it into
+    `ConfigEntryNotReady`. This is what stopped the "logged out roughly
+    once a day" bug — do not collapse these back into one auth failure.
 
 ## Planned for the next major bump
 
