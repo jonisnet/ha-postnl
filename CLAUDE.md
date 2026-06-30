@@ -206,6 +206,35 @@ re-propose these as improvements:
   `PostNLParcelSensor`. Summary sensors already keep the whole parcel
   list out of the recorder via the `parcels` attribute.
 
+### Adopted in 4.3.0 — device triggers + refresh button (do not refactor away)
+
+- **`device_id` on every fired event.** Both `_fire_change_events` and
+  `_fire_letter_events` resolve the account's device id once (cached in
+  `self._cached_device_id`, looked up via
+  `dr.async_entries_for_config_entry`) and add `device_id` to the three
+  parcel events **and** `postnl_letter_announced`. Stays `None` until the
+  device exists, which is fine — events are suppressed on the first
+  refresh anyway. This is the key that lets device triggers filter
+  per-account.
+- **`device_trigger.py`** exposes four no-code device triggers:
+  `parcel_registered` / `parcel_status_changed` /
+  `parcel_delivery_time_changed` (identical to DHL/DPD) plus the
+  PostNL-specific `letter_announced`. Delegates to
+  `homeassistant.components.homeassistant.triggers.event` with
+  `CONF_EVENT_DATA={device_id: ...}`. Trigger-type names live under
+  `device_automation.trigger_type` in strings/translations.
+- **Refresh `button`** (`Platform.BUTTON` first in `PLATFORMS`,
+  `button.py`). One `PostNLRefreshButton` per account, unique_id
+  `{account_id}_refresh`, `translation_key="refresh"`. `async_press`
+  calls `async_request_refresh()` on the coordinator. Lands on the same
+  `PostNL (<email>)` device.
+- **Sensor cleanup is now sensor-scoped.** The setup-time stale-entity
+  loop in `sensor.py` filters on `entity_entry.domain == "sensor"` before
+  treating an `{account_id}_*` unique_id as a per-parcel barcode. Without
+  this guard it deletes the refresh button (`{account_id}_refresh`) **and
+  the letter image entities** (`{account_id}_letter_image_*`) on every
+  setup. Do not drop the domain check.
+
 ## Planned for the next major bump
 
 - **Exception translations** (Gold-tier rule). `UpdateFailed(...)`

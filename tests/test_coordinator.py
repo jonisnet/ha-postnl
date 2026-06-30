@@ -1194,3 +1194,53 @@ async def test_transform_shipment_delivered_history_failure_is_non_fatal(hass):
     # A failed history fetch must not break the delivered parcel.
     assert parcel["delivered"] is True
     assert parcel["history"] is None
+
+
+# ---------------------------------------------------------------------------
+# _device_id — resolved from the device registry, cached, attached to events
+# ---------------------------------------------------------------------------
+
+
+async def test_device_id_resolves_and_caches(hass):
+    """_device_id finds the account's device and caches it for later events."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+    from homeassistant.helpers import device_registry as dr
+
+    from custom_components.postnl.const import DOMAIN
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="user@example.com",
+        data={},
+        options={},
+    )
+    entry.add_to_hass(hass)
+
+    device = dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, "abc-123")},
+    )
+
+    coordinator = PostNLCoordinator(hass, entry)
+
+    assert coordinator._device_id() == device.id
+    # Second call returns the cached value (no second registry lookup).
+    assert coordinator._device_id() == device.id
+
+
+async def test_device_id_none_when_no_device(hass):
+    """_device_id stays None until a device has been registered."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    from custom_components.postnl.const import DOMAIN
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="nobody@example.com",
+        data={},
+        options={},
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = PostNLCoordinator(hass, entry)
+    assert coordinator._device_id() is None

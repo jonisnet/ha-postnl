@@ -8,6 +8,7 @@ import requests
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import (DataUpdateCoordinator,
                                                       UpdateFailed)
 
@@ -478,8 +479,31 @@ class PostNLCoordinator(DataUpdateCoordinator):
         # on the first refresh for the same reason — we do not want to fire
         # ``postnl_letter_announced`` for every letter that already existed.
         self._known_letter_ids: set[str] | None = None
+        # Cached device id for this account, attached to every fired event so
+        # device-trigger automations can filter to a specific PostNL account.
+        # ``None`` until the device exists (i.e. the sensors are set up).
+        self._cached_device_id: str | None = None
         _LOGGER.debug("PostNLCoordinator initialized with update interval: %s", self.update_interval)
-        
+
+    def _device_id(self) -> str | None:
+        """Resolve (and cache) this account's device id for event payloads.
+
+        Looked up from the device registry by config entry. Stays ``None``
+        until the device has been registered (the sensors create it on first
+        setup), which is harmless because events are suppressed on the very
+        first refresh anyway.
+        """
+        if self._cached_device_id is not None:
+            return self._cached_device_id
+        registry = dr.async_get(self.hass)
+        device = next(
+            iter(dr.async_entries_for_config_entry(registry, self.config_entry.entry_id)),
+            None,
+        )
+        if device is not None:
+            self._cached_device_id = device.id
+        return self._cached_device_id
+
     async def _async_update_data(self) -> dict[str, list[dict]]:
         _LOGGER.debug("Starting data update for PostNL.")
         try:
@@ -568,6 +592,7 @@ class PostNLCoordinator(DataUpdateCoordinator):
             return
 
         known_times = self._known_delivery_times or {}
+        device_id = self._device_id()
 
         for parcel in parcels:
             barcode = parcel.get("barcode")
@@ -577,7 +602,7 @@ class PostNLCoordinator(DataUpdateCoordinator):
             if barcode not in self._known_state:
                 self.hass.bus.async_fire(
                     f"{DOMAIN}_parcel_registered",
-                    {**parcel},
+                    {**parcel, "device_id": device_id},
                 )
                 continue
 
@@ -586,6 +611,7 @@ class PostNLCoordinator(DataUpdateCoordinator):
                     f"{DOMAIN}_parcel_status_changed",
                     {
                         **parcel,
+                        "device_id": device_id,
                         "old_status": self._known_state[barcode],
                         "new_status": new_status,
                     },
@@ -606,6 +632,7 @@ class PostNLCoordinator(DataUpdateCoordinator):
                     f"{DOMAIN}_parcel_delivery_time_changed",
                     {
                         **parcel,
+                        "device_id": device_id,
                         "old_planned_from": old_from,
                         "new_planned_from": new_from,
                         "old_planned_to": old_to,
@@ -624,13 +651,14 @@ class PostNLCoordinator(DataUpdateCoordinator):
         """
         if self._known_letter_ids is None:
             return
+        device_id = self._device_id()
         for letter in letters:
             letter_id = letter.get("id")
             if not letter_id or letter_id in self._known_letter_ids:
                 continue
             self.hass.bus.async_fire(
                 f"{DOMAIN}_letter_announced",
-                {**letter, "carrier": "PostNL"},
+                {**letter, "carrier": "PostNL", "device_id": device_id},
             )
 
     def _apply_delivered_filter(self, parcels: list[dict]) -> list[dict]:

@@ -85,7 +85,20 @@
       }
     }
   },
+  "device_automation": {
+    "trigger_type": {
+      "parcel_registered": "Een pakket is geregistreerd",
+      "parcel_status_changed": "De status van een pakket is gewijzigd",
+      "parcel_delivery_time_changed": "De verwachte bezorgtijd van een pakket is gewijzigd",
+      "letter_announced": "Een brief is aangekondigd"
+    }
+  },
   "entity": {
+    "button": {
+      "refresh": {
+        "name": "Verversen"
+      }
+    },
     "sensor": {
       "incoming_parcels": {
         "name": "Inkomende pakketten",
