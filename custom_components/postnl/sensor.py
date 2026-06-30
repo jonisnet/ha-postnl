@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceEntryType
@@ -48,6 +49,7 @@ async def async_setup_entry(
         f"{account_id}_outgoing_parcels",
         f"{account_id}_delivered_parcels",
         f"{account_id}_letters",
+        f"{account_id}_last_update",
     }
     for entity_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
         # Only per-parcel *sensors* are managed here; skip other platforms
@@ -74,6 +76,7 @@ async def async_setup_entry(
         PostNLOutgoingParcelsSensor(coordinator=coordinator, userinfo=userinfo),
         PostNLDeliveredParcelsSensor(coordinator=coordinator, userinfo=userinfo),
         PostNLLettersSensor(coordinator=coordinator, userinfo=userinfo),
+        PostNLLastUpdateSensor(coordinator=coordinator, userinfo=userinfo),
     ]
 
     for parcel in receiver_parcels:
@@ -386,3 +389,33 @@ class PostNLLettersSensor(CoordinatorEntity[PostNLCoordinator], SensorEntity):
             "unread": sum(1 for letter in self._letters if letter.get("unread")),
             "letters": self._letters,
         }
+
+
+class PostNLLastUpdateSensor(CoordinatorEntity[PostNLCoordinator], SensorEntity):
+    """Diagnostic sensor reporting when PostNL was last polled successfully.
+
+    Updates on every successful coordinator refresh, even when no parcel
+    value changes — so users can alert on a silently-stale integration
+    (e.g. expired auth) that the count sensors would not reveal.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "last_update"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_attribution = "Data provided by PostNL"
+
+    def __init__(
+        self,
+        coordinator: PostNLCoordinator,
+        userinfo: dict[str, Any],
+    ) -> None:
+        super().__init__(coordinator)
+        account_id: str = userinfo.get("account_id", "")
+        self._attr_unique_id = f"{account_id}_last_update"
+        self._attr_device_info = _build_device_info(userinfo)
+
+    @property
+    def native_value(self) -> datetime | None:
+        """Return the timestamp of the last successful poll."""
+        return self.coordinator.last_success_time

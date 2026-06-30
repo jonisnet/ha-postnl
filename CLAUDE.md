@@ -234,6 +234,14 @@ re-propose these as improvements:
   this guard it deletes the refresh button (`{account_id}_refresh`) **and
   the letter image entities** (`{account_id}_letter_image_*`) on every
   setup. Do not drop the domain check.
+- **Diagnostic `last_update` sensor** (`PostNLLastUpdateSensor`,
+  unique_id `{account_id}_last_update`, `EntityCategory.DIAGNOSTIC`,
+  device class TIMESTAMP). Reads `coordinator.last_success_time`, stamped
+  with `datetime.now(timezone.utc)` just before `_async_update_data`
+  returns. Lets users alert on a silently stale integration. **Must be in
+  `non_parcel_unique_ids`** in `sensor.py` — it is a sensor whose
+  unique_id starts with `{account_id}_`, so without the exclusion the
+  setup cleanup loop deletes it as a stale parcel.
 - **Deliveries `calendar`** (`Platform.CALENDAR` in `PLATFORMS`,
   `calendar.py`). One `PostNLDeliveriesCalendar` per account, unique_id
   `{account_id}_deliveries`, `translation_key="deliveries"`. Read-only

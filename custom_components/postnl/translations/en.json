@@ -130,6 +130,9 @@
       "letters": {
         "name": "Letters",
         "unit_of_measurement": "letters"
+      },
+      "last_update": {
+        "name": "Last successful update"
       }
     },
     "image": {

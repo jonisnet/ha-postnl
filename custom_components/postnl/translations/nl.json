@@ -130,6 +130,9 @@
       "letters": {
         "name": "Brieven",
         "unit_of_measurement": "brieven"
+      },
+      "last_update": {
+        "name": "Laatste succesvolle update"
       }
     },
     "image": {

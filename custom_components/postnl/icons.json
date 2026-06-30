@@ -31,6 +31,9 @@
       },
       "letters": {
         "default": "mdi:email"
+      },
+      "last_update": {
+        "default": "mdi:clock-check-outline"
       }
     },
     "image": {

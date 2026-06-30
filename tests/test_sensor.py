@@ -234,3 +234,29 @@ def test_letters_sensor_reports_total_and_unread_count():
     attrs = sensor.extra_state_attributes
     assert attrs["unread"] == 1
     assert len(attrs["letters"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# PostNLLastUpdateSensor
+# ---------------------------------------------------------------------------
+
+
+def test_last_update_sensor_reports_coordinator_timestamp():
+    from datetime import datetime, timezone
+
+    from custom_components.postnl.sensor import PostNLLastUpdateSensor
+
+    coordinator = _coordinator()
+    moment = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
+    coordinator.last_success_time = moment
+    sensor = PostNLLastUpdateSensor(coordinator, _USERINFO)
+    assert sensor.native_value == moment
+
+
+def test_last_update_sensor_none_before_first_success():
+    from custom_components.postnl.sensor import PostNLLastUpdateSensor
+
+    coordinator = _coordinator()
+    coordinator.last_success_time = None
+    sensor = PostNLLastUpdateSensor(coordinator, _USERINFO)
+    assert sensor.native_value is None

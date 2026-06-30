@@ -483,6 +483,10 @@ class PostNLCoordinator(DataUpdateCoordinator):
         # device-trigger automations can filter to a specific PostNL account.
         # ``None`` until the device exists (i.e. the sensors are set up).
         self._cached_device_id: str | None = None
+        # Timestamp of the last successful poll, surfaced by a diagnostic
+        # sensor so users can alert on a silently-stale integration (the
+        # count sensors only change when a value changes, not every poll).
+        self.last_success_time: datetime | None = None
         _LOGGER.debug("PostNLCoordinator initialized with update interval: %s", self.update_interval)
 
     def _device_id(self) -> str | None:
@@ -568,6 +572,7 @@ class PostNLCoordinator(DataUpdateCoordinator):
                 len(data['receiver']), len(data['sender']), len(self.delivered_receiver), len(self.letters),
             )
 
+            self.last_success_time = datetime.now(timezone.utc)
             return data
         except ConfigEntryAuthFailed:
             raise
