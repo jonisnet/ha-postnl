@@ -84,7 +84,7 @@ sections:
 
 | Option | Description |
 |---|---|
-| Include status history | Adds a `history` attribute to each parcel — the ordered list of status updates (timestamp, canonical status, original PostNL text), capped to the most recent 20. **Off by default.** For delivered parcels this needs one extra lookup per refresh, so only enable it if you want the full timeline. The attribute is kept out of the recorder database. |
+| Include status history | Adds a `history` attribute to each parcel — the ordered list of status updates (timestamp, canonical status, original PostNL text), capped to the most recent 20. **Off by default.** The attribute is kept out of the recorder database. |
 
 ### Polling
 

@@ -61,7 +61,7 @@
               "include_history": "Statusgeschiedenis toevoegen"
             },
             "data_description": {
-              "include_history": "Voegt een geschiedenis-attribuut per pakket toe met elke statusupdate (tijdstip, status, originele tekst). Standaard uit — voor bezorgde pakketten is hiervoor een extra ophaalactie per verversing nodig."
+              "include_history": "Voegt een geschiedenis-attribuut per pakket toe met elke statusupdate (tijdstip, status, originele tekst). Standaard uit."
             }
           },
           "polling": {
