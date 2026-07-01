@@ -154,6 +154,27 @@ re-propose these as improvements:
     `ConfigEntryNotReady`. This is what stopped the "logged out roughly
     once a day" bug — do not collapse these back into one auth failure.
 
+### Robustness (adopted after the 4.3.0 review — do not refactor away)
+
+- **Reauth guards the account.** `reauth_confirm` calls
+  `async_set_unique_id` + `_abort_if_unique_id_mismatch` so entering a
+  *different* PostNL account's credentials aborts instead of rebinding
+  the entry to another account.
+- **Every `jouw_api` call has a `(10, 60)` timeout.** `requests` has no
+  session-level default; without it a hanging PostNL server blocks an
+  executor thread — and the whole refresh — indefinitely.
+- **API clients are reused across polls.** `PostNLGraphql` /
+  `PostNLJouwAPI` are only rebuilt when the access token changes
+  (`_api_token` tracks it); each `PostNLJouwAPI` owns a
+  `requests.Session` with a connection pool that would otherwise be
+  recreated and leaked every poll.
+- **One broken parcel no longer fails the refresh.** The active-path
+  T&T call degrades per parcel: reuse the last successful transform for
+  that barcode (`_parcel_cache`, only populated from transforms backed
+  by real colli data, pruned to current barcodes each poll), else fall
+  back to the GraphQL-only shipment fields. `UpdateFailed` is now the
+  last resort when there is nothing at all to show for a parcel.
+
 ### Adopted in 4.2.0 — history (do not refactor away)
 
 - **Per-parcel `history`** — a new top-level canonical field (alongside
@@ -174,8 +195,10 @@ re-propose these as improvements:
   DHL/DPD). The delivered short-circuit normally skips Track & Trace; when
   the option is on, `_delivered_history` makes the extra T&T call. That
   call is **non-fatal** — a `RequestException` there logs and falls back
-  to `history = None` rather than failing the whole refresh (unlike the
-  active-path call, which is essential and propagates to `UpdateFailed`).
+  to `history = None` rather than failing the whole refresh. A successful
+  fetch is cached per barcode (`_delivered_history_cache`) — a delivered
+  parcel's timeline never changes, so it is one call per parcel ever, not
+  one per poll; failures are NOT cached so the next poll retries.
 - **Per-event status** maps from the stable `observationCode` via
   `_OBSERVATION_CODE_MAP` + `map_observation_status` (NOT the Dutch
   text). Unmapped codes → `null` (history) and a one-shot **warning**.
