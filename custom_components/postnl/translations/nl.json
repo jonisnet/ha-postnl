@@ -22,7 +22,7 @@
         }
       },
       "reauth_confirm": {
-        "title": "PostNL — opnieuw inloggen vereist",
+        "title": "Opnieuw inloggen bij PostNL",
         "description": "Je PostNL-sessie is verlopen. Voer je gegevens opnieuw in.",
         "data": {
           "username": "E-mailadres",
@@ -32,10 +32,10 @@
     },
     "error": {
       "invalid_auth": "Ongeldig e-mailadres of wachtwoord.",
-      "cannot_connect": "Kan geen verbinding maken met PostNL. Probeer het opnieuw."
+      "cannot_connect": "Kan PostNL niet bereiken. Controleer je netwerkverbinding."
     },
     "abort": {
-      "already_configured": "Dit account is al geconfigureerd.",
+      "already_configured": "Dit PostNL-account is al geconfigureerd.",
       "reauth_successful": "Opnieuw inloggen geslaagd.",
       "unique_id_mismatch": "Log opnieuw in met hetzelfde PostNL-account waarmee deze koppeling is ingesteld."
     }
@@ -66,12 +66,12 @@
             }
           },
           "polling": {
-            "name": "Polling",
+            "name": "Verversen",
             "data": {
-              "refresh_interval": "Elke"
+              "refresh_interval": "Ververs elke"
             },
             "data_description": {
-              "refresh_interval": "Hoe vaak de integratie PostNL ophaalt voor pakketupdates. Een langer interval is vriendelijker voor de API; 30 minuten is voor de meeste pakketten ruim voldoende."
+              "refresh_interval": "Hoe vaak de integratie PostNL controleert op pakketupdates. Een langzamer interval is vriendelijker voor PostNL; de standaard van 30 minuten is ruim voldoende voor de meeste pakketten."
             }
           }
         }
